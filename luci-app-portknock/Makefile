@@ -18,6 +18,7 @@ define Package/$(PKG_NAME)
   SUBMENU:=3. Applications
   TITLE:=Port knocking
   PKGARCH:=all
+  DEPENDS:=firewall4
 endef
 
 define Package/$(PKG_NAME)/description
