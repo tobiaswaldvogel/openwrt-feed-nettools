@@ -1,4 +1,6 @@
 # Packages
+- luci-app-portknock
+Open tcp port with port knocking sequence. Implemented just with nftable rules
 - collectd-mod-nftables  
 collectd plugin for collecting statistics from nftables counters
 - luci-app-statistics-nftables  

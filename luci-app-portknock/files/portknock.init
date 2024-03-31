@@ -1,0 +1,144 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2006-2016 OpenWrt.org
+START=13
+USE_PROCD=1
+
+INCLUDE=/tmp/etc/firewall.knock
+RUN_INCLUDE=1
+
+service_triggers() {
+        procd_add_reload_trigger portknock
+}
+
+add_knock_port() {
+	local knock_port=$1
+
+	rule="tcp dport $knock_port"
+	[ ${i} -ne 1 ] && rule="${rule} ip saddr . ${port} . ${prev} @knocked update @knocked \"{ ip saddr . ${port} . ${prev} timeout 0s }\" "
+	rule="${rule} update @knocked \"{ ip saddr . ${port} . ${i} timeout $timeout_knock }\""
+
+	if [ ${i} -ne ${last_rule} ]; then
+		rule="${rule} return comment \\\"Knock for ${port} step ${i}\\\""
+	else
+		rule="${rule} log prefix \\\"Port knock for ${port} accepted: \\\" return"
+	fi
+
+	echo >>${INCLUDE} "\${INSERT_RULE} knock_${port} ${rule}"
+
+	if [ ${i} -ne ${last_rule} ]; then
+		echo >>${INCLUDE} "\${INSERT_RULE} knock_${port}" \
+					"ip saddr . ${port} . ${i} @knocked" \
+					"update @knocked \"{ ip saddr . ${port} . ${i} timeout 0s }\"" \
+					"return comment \\\"Unknock ${port} step ${i}\\\""
+
+		echo >>${INCLUDE} "\${INSERT_RULE} knock_${port}" \
+					"tcp dport \"{ ${knock_port}${knock_repeat_ports} }\"" \
+					"ip saddr . ${port} . ${i} @knocked return" \
+					"comment \\\"Knock for ${port} step ${i} again\\\""
+	else
+		if [ ${target} == "input" ]; then
+			echo >>${INCLUDE} "\${INSERT_RULE} knock_${port}" \
+					"tcp dport ${port}" \
+					"ip saddr . ${port} . ${last_rule} @knocked" \
+					"update @knocked \"{ ip saddr . ${port} . ${last_rule} timeout ${timeout_connect} }\"" \
+					"counter accept"
+		fi
+	fi
+	
+	prev=${i}
+	i=$(expr ${i} + 1)
+}
+
+add_exception_port() {
+	knock_repeat_ports="${knock_repeat_ports},$1"
+}
+
+count_knock_ports() {
+	last_rule=$(expr ${last_rule} + 1)
+}
+
+add_knock() {
+	local enabled
+	config_get enabled $1 enabled 1
+
+	[ ${enabled} -ne 1 ] && return
+
+	config_get port $1 port
+	config_get timeout_knock $1 timeout_knock 5s
+	config_get timeout_connect $1 timeout_connect 5s
+	config_get exception $1 exception
+	config_get dest_ip $1 dest_ip
+	config_get dest_port $1 dest_port
+	config_get target $1 target
+
+	last_rule=0
+	config_list_foreach $1 knock_port count_knock_ports
+
+	knock_repeat_ports=""
+	config_list_foreach $1 exception add_exception_port
+
+	echo >>${INCLUDE} "\${LIST_CHAIN} knock_${port} >/dev/null 2>&1"
+	echo >>${INCLUDE} "[ \$? -eq 0 ] && \${FLUSH_CHAIN} knock_${port} || \${ADD_CHAIN} knock_${port}"
+	echo >>${INCLUDE} "\${ADD_RULE} knock jump knock_${port}"
+
+	i=1
+	config_list_foreach $1 knock_port add_knock_port
+
+	if [ ${target} == "redirect" ]; then
+		echo >>${INCLUDE} "\${ADD_RULE} dstnat_wan_knock" \
+					"tcp dport ${port}" \
+					"ip saddr . ${port} . ${last_rule} @knocked" \
+					"update @knocked \"{ ip saddr . ${port} . ${last_rule} timeout ${timeout_connect} }\"" \
+					"counter dnat ip to ${dest_ip}:${dest_port}"
+	fi
+}
+
+start_service() {
+	mkdir -p ${INCLUDE%/*}
+	rm ${INCLUDE}
+	touch ${INCLUDE}
+
+	echo >>${INCLUDE} "NFT=\"/usr/sbin/nft\""
+	echo >>${INCLUDE} "FAMILY=inet"
+	echo >>${INCLUDE} "TABLE=fw4"
+	echo >>${INCLUDE} "LIST_CHAIN=\"\${NFT} list chain \${FAMILY} \${TABLE}\""
+	echo >>${INCLUDE} "ADD_CHAIN=\"\${NFT} add chain \${FAMILY} \${TABLE}\""
+	echo >>${INCLUDE} "FLUSH_CHAIN=\"\${NFT} flush chain \${FAMILY} \${TABLE}\""
+	echo >>${INCLUDE} "ADD_RULE=\"\${NFT} add rule \${FAMILY} \${TABLE}\""
+	echo >>${INCLUDE} "INSERT_RULE=\"\${NFT} insert rule \${FAMILY} \${TABLE}\""
+	echo >>${INCLUDE} "ADD_SET=\"\${NFT} add set \${FAMILY} \${TABLE}\""
+	echo >>${INCLUDE}
+	echo >>${INCLUDE} "\${LIST_CHAIN} knock >/dev/null 2>&1"
+	echo >>${INCLUDE} "if [ \$? -eq 0 ]; then"
+	echo >>${INCLUDE} "  \${FLUSH_CHAIN} knock"
+	echo >>${INCLUDE} "  \${FLUSH_CHAIN} dstnat_wan_knock"
+	echo >>${INCLUDE} "else"
+	echo >>${INCLUDE} "  \${ADD_SET} knocked \"{ type ipv4_addr . inet_service . uid; flags timeout; size 256; }\""
+	echo >>${INCLUDE} "  \${ADD_CHAIN} knock"
+	echo >>${INCLUDE} "  \${INSERT_RULE} input_wan jump knock"
+	echo >>${INCLUDE} "  \${ADD_CHAIN} dstnat_wan_knock"
+	echo >>${INCLUDE} "  \${INSERT_RULE} dstnat_wan jump dstnat_wan_knock"
+	echo >>${INCLUDE} "fi"
+	echo >>${INCLUDE}
+
+
+	config_load portknock
+	config_foreach add_knock knock
+
+	config_load firewall
+	config_get path knock path
+	if [ -z "${path}" ]; then
+		uci_add firewall include knock
+		uci_set firewall knock path ${INCLUDE}
+		uci_set firewall knock fw4_compatible 1
+		uci_commit
+	fi
+
+	[ ${RUN_INCLUDE} -eq 1 ] && sh ${INCLUDE}
+}
+
+boot() {
+	RUN_INCLUDE=0
+	start
+}
+

@@ -1,0 +1,12 @@
+{
+	"admin/services/portknock": {
+		"title": "Port knocking",
+		"action": {
+			"type": "view",
+			"path": "portknock"
+		},
+		"depends": {
+			"acl": [ "luci-app-portknock" ]
+		}
+	}
+}
