@@ -165,7 +165,7 @@ return view.extend({
                 o.datatype = 'port';
 
 		var type = s.option(form.ListValue, 'type', _('Knock type'));
-		type.value('ping', _('ICMP echo request size (ping packet size)'));
+		type.value('ping', _('ICMP echo request size (ping)'));
 		type.value('port', _('Port sequence'));
 
 		var target = s.option(form.ListValue, 'target', _('Target'));
@@ -179,7 +179,7 @@ return view.extend({
                 o.datatype = 'port';
 		o.depends({ target: 'redirect' });
 
-		o = s.option(form.Value, 'timeout_knock', _('Knock sequence timeout'), _('Timeout after which the sequence will be aborted'));
+		o = s.option(form.Value, 'timeout_knock', _('Knock sequence timeout'), _('Timeout to abort the sequence'));
 		o.modalonly = true;
 		o.default = '5s';
 		o.validate = this.validate_time;
