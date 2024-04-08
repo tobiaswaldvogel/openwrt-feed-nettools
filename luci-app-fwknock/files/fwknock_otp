@@ -1,0 +1,67 @@
+#!/bin/sh
+. /lib/functions.sh
+
+TABLE="inet fw4"
+KNOCK_CODE_SET="kn_codes"
+
+IPV4_ICMP_HEADER_LEN=28
+
+SMALLEST_PERIOD=9999
+
+set_otp() {
+	local section_id=$1
+
+	idx=$(expr ${idx} + 1)
+
+	config_get mech   ${section_id} mech
+
+	[ "${mech}" != "totp" ] && return
+
+	config_get type   ${section_id} type
+
+	[ "${type}" != "ping" ] && return
+
+	config_get seed   ${section_id} seed
+        config_get alg    ${section_id} alg           sha1
+        config_get period ${section_id} period        60
+	config_get dpp    ${section_id} digitsperping 3
+
+	[ ${dpp} -ne 1 ] && OFFSET=0 || OFFSET=50
+
+	local codes=""
+
+        passcode=$(oathtool --totp=${alg} -d 6 -s ${period} ${seed})
+	round=0
+	while [ ${#passcode} -gt 0 ]; do
+		round=$(expr ${round} + 1)
+		codes="${codes}, ${idx} . ${round} . $(expr ${passcode:0:${dpp}} + ${IPV4_ICMP_HEADER_LEN} + ${OFFSET}) timeout ${validity}s"
+		passcode=${passcode:${dpp}}
+	done
+	nft add element ${TABLE} ${KNOCK_CODE_SET} { ${codes:2} }
+}
+
+find_smallest_period() {
+	local section_id=$1
+
+	config_get mech   ${section_id} mech
+	[ "${mech}" != "totp" ] && return
+
+	config_get type   ${section_id} type
+	[ "${type}" != "ping" ] && return
+
+        config_get period ${section_id} period 60
+	[ ${period} -gt ${SMALLEST_PERIOD} ] && return
+
+	SMALLEST_PERIOD=${period}
+}
+
+config_load fwknock
+config_foreach find_smallest_period knock
+
+while true; do
+	seconds=$(date +%S)
+	validity=$(expr ${SMALLEST_PERIOD} - ${seconds} % ${SMALLEST_PERIOD})
+
+	idx=0; config_foreach set_otp knock
+	sleep ${validity}
+done

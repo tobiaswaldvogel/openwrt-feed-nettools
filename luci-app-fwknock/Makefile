@@ -1,6 +1,6 @@
 include $(TOPDIR)/rules.mk
 
-PKG_NAME:=luci-app-portknock
+PKG_NAME:=luci-app-fwknock
 PKG_VERSION=1.0
 PKG_RELEASE:=1
 PKG_BUILD_DEPENDS:=luci
@@ -69,8 +69,10 @@ define Package/$(PKG_NAME)/install
 	  $(if $(CONFIG_LUCI_CSSTIDY),$(call CssTidy,$(1)$(HTDOCS)/),true); \
 	$(INSTALL_DIR) $(1)/; \
 	cp -pR $(PKG_BUILD_DIR)/root/* $(1)/
+	$(INSTALL_DIR) $(1)/usr/bin
+	$(INSTALL_BIN) ./files/fwknock_otp $(1)/usr/bin/fwknock_otp
 	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ./files/portknock.init $(1)/etc/init.d/portknock
+	$(INSTALL_BIN) ./files/fwknock.init $(1)/etc/init.d/fwknock
 endef
 
 $(eval $(call BuildPackage,$(PKG_NAME)))

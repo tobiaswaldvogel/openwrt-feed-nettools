@@ -1,6 +1,7 @@
 # Packages
-- luci-app-portknock  
-Open tcp port with port knocking sequence. Implemented just with nftable rules
+- luci-app-fwknock  
+Opens tcp ports with a ping or port knocking sequence. Implemented just with nftable rules.  
+In case of using TOTP the nftables set holding the codes is updated periodically with a shell script and oathtool
 - collectd-mod-nftables  
 collectd plugin for collecting statistics from nftables counters
 - luci-app-statistics-nftables  

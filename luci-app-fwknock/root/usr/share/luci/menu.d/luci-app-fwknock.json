@@ -1,0 +1,12 @@
+{
+	"admin/services/fwknock": {
+		"title": "Firewall knocking",
+		"action": {
+			"type": "view",
+			"path": "fwknock"
+		},
+		"depends": {
+			"acl": [ "luci-app-fwknock" ]
+		}
+	}
+}
