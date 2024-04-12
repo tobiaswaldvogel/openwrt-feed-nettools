@@ -20,8 +20,8 @@ BLACKLIST_TIME="1m"
 IPV4_ICMP_HEADER_LEN=28
 STATUS_ACCEPTED=255
 
+#COUNTER="counter"
 COMMENTS=0
-COUNTER=0
 
 network_get_device WAN_IFNAME wan
 
@@ -33,7 +33,9 @@ add_knock_ping_rules() {
 	local code
 	local digits
 	local next
+	local key_code
 	local section_id=$1
+	local COMMENT=""
 
 	config_get mech   ${section_id} mech
 	config_get dpp    ${section_id} digitsperping 3
@@ -52,97 +54,84 @@ add_knock_ping_rules() {
 
 	next=1; while [ ! -z "${code}" ]; do
 		round=${next}
+		key_code="${idx} . ${round} . meta length"
 
 		if [ "${mech}" == "static" ]; then
 			psize=$(expr ${code:0:${dpp}} + ${IPV4_ICMP_HEADER_LEN} + ${OFFSET})
-			echo >>${INC} "nft add element ${TABLE} ${KNOCK_CODES} { ${idx} . ${round} . ${psize} }"
+			[ ! -z "${CODES}" ] && CODES="${CODES}, "
+			CODES="${CODES}${idx} . ${round} . ${psize}"
 		fi
 
 		code=${code:${dpp}}
 		[ -z "${code}" ] && next=${STATUS_ACCEPTED} || next=$(expr ${round} + 1)
 
-		echo -n >>${INC} "nft add rule ${TABLE} ${KNOCK_PING_CHAIN}"
+
+		[ ${COMMENTS} -eq 1 ] && COMMENT="comment \\\"${COMMENT_PREFIX}: round ${round}\\\""
 		# Check packet size against digits
-		echo -n >>${INC} " ${idx} . ${round} . meta length @${KNOCK_CODES}"
+		PING="${PING}\t\t${key_code} @${KNOCK_CODES}"
 		if [ ${round} -eq 1 ]; then
 			# First round, ignore if in progress or blacklisted
-			echo -n >>${INC} " ip saddr . ${idx} . ${round} != @${KNOCK_STATUS}"
+			PING="${PING} ${KEY} . ${round} != @${KNOCK_STATUS}"
 			# Block a new sequence within the blacklist time
-			echo -n >>${INC} " update @${KNOCK_STATUS} { ip saddr . ${idx} . ${round} timeout ${BLACKLIST_TIME} }"
+			PING="${PING} update @${KNOCK_STATUS} { ${KEY} . ${round} timeout ${BLACKLIST_TIME} }"
 		else
-			echo -n >>${INC} " ip saddr . ${idx} . ${round} @${KNOCK_STATUS}"
-			echo -n >>${INC} " delete @${KNOCK_STATUS} { ip saddr . ${idx} . ${round} }"
+			PING="${PING} ${KEY} . ${round} @${KNOCK_STATUS} delete @${KNOCK_STATUS} { ${KEY} . ${round} }"
 		fi
 		# Set next round
-		echo -n >>${INC} " update @${KNOCK_STATUS} { ip saddr . ${idx} . ${next} timeout ${timeout_knock} }"
+		PING="${PING} update @${KNOCK_STATUS} { ${KEY} . ${next} timeout ${timeout_knock} }"
 		if [ -z "${code}" ]; then
-			# Last round
-			# Invalidate if OTP
-			[ "${mech}" != "static" ] && echo -n >>${INC} " delete @${KNOCK_CODES} { ${idx} . ${round} . meta length }"
+			# Last round, invalidate if OTP
+			[ "${mech}" != "static" ] && PING="${PING} delete @${KNOCK_CODES} { ${key_code} }"
 			# Mark knock complete
-			echo -n >>${INC} " log prefix \\\"Ping knock for ports ${ports} accepted: \\\""
+			PING="${PING} log prefix \\\"Ping knock for ${ports_caption} ${ports} accepted: \\\""
 		fi
-		echo -n >>${INC} " return"
-		[ ${COMMENTS} -eq 1 ] && echo -n >>${INC} " comment \\\"!knock ping \(ports ${ports}\): round ${round}\\\""
-		echo    >>${INC} ""
+		PING="${PING} ${COUNTER} return ${COMMENT}\n"
 
 		if [ ${round} -ne  1 ]; then
-			echo -n >>${INC} "nft add rule ${TABLE} ${KNOCK_PING_CHAIN}"
-			echo -n >>${INC} " delete @${KNOCK_STATUS} { ip saddr . ${idx} . ${round} }"
-			[ ${COMMENTS} -eq 1 ] && echo -n >>${INC} " comment \\\"!knock \(ports ${ports}\): round ${round}, abort sequence\\\""
-			echo    >>${INC} ""
+			[ ${COMMENTS} -eq 1 ] && COMMENT="comment \\\"${COMMENT_PREFIX}: round ${round}, abort sequence\\\""
+			PING="${PING}\t\tdelete @${KNOCK_STATUS} { ${KEY} . ${round} } ${COMMENT}\n"
 		fi
-
-#		p=$(expr ${p} + ${dpp})
 	done
 }
 
 add_knock_port_rules() {
         local knock_port=$1
+	local COMMENT=""
 
 	prev=${round}
 	round=${next}
+
 	[ ${round} -eq ${last} ] && next=${STATUS_ACCEPTED} || next=$(expr ${round} + 1)
 
 	# Accept also knocking multiple times to the same port
 	if [ ${round} -ne 1 ]; then
-		echo -n >>${INC} "nft add rule ${TABLE} ${KNOCK_WAN_CHAIN}"
-		echo -n >>${INC} " tcp dport { ${knock_repeat_ports} }"
-		echo -n >>${INC} " ip saddr . ${idx} . ${round} @${KNOCK_STATUS}"
-		[ ${COUNTER}  -eq 1 ] && echo -n >>${INC} " counter"
-		echo -n >>${INC} " return"
-		[ ${COMMENTS} -eq 1 ] && echo -n >>${INC} " comment \\\"!knock port \(ports ${ports}\): knock again for round ${prev}\\\""
-		echo    >>${INC} ""
+		[ ${COMMENTS} -eq 1 ] && COMMENT="comment \\\"${COMMENT_PREFIX}: knock again for round ${prev}\\\""
+		INPUT="${INPUT}\t\ttcp dport { ${knock_repeat_ports} }"
+		INPUT="${INPUT} ${KEY} . ${round} @${KNOCK_STATUS} ${COUNTER} return ${COMMENT}\n"
 	fi
 
 	# Repeat ports for next round
 	knock_repeat_ports="${knock_port}${knock_except_ports}"
 
-	echo -n >>${INC} "nft add rule ${TABLE} ${KNOCK_WAN_CHAIN}"
-	echo -n >>${INC} " tcp dport ${knock_port}"
+	[ ${COMMENTS} -eq 1 ] && COMMENT="comment \\\"${COMMENT_PREFIX}: round ${round}\\\""
+	INPUT="${INPUT}\t\ttcp dport ${knock_port}"
 	if [ ${round} -eq 1 ]; then
 		# First round, ignore if in progress or blacklisted
-		echo -n >>${INC} " ip saddr . ${idx} . ${round} != @${KNOCK_STATUS}"
+		INPUT="${INPUT} ${KEY} . ${round} != @${KNOCK_STATUS}"
 		# Block a new sequence within the blacklist time
-		echo -n >>${INC} " update @${KNOCK_STATUS} { ip saddr . ${idx} . ${round} timeout ${BLACKLIST_TIME} }"
+		INPUT="${INPUT} update @${KNOCK_STATUS} { ${KEY} . ${round} timeout ${BLACKLIST_TIME} }"
 	else
-		echo -n >>${INC} " ip saddr . ${idx} . ${round} @${KNOCK_STATUS}"
-		echo -n >>${INC} " delete @${KNOCK_STATUS} { ip saddr . ${idx} . ${round} }"
+		INPUT="${INPUT} ${KEY} . ${round} @${KNOCK_STATUS} delete @${KNOCK_STATUS} { ${KEY} . ${round} }"
 	fi
 	# Set next round
-	echo -n >>${INC} " update @${KNOCK_STATUS} { ip saddr . ${idx} . ${next} timeout ${timeout_knock} }"
-	[ ${round} -eq ${last} ] && echo -n >>${INC} " log prefix \\\"Port knock for ports ${ports} accepted: \\\""
-	[ ${COUNTER}  -eq 1 ] && echo -n >>${INC} " counter"
-	echo -n >>${INC} " return"
-	[ ${COMMENTS} -eq 1 ] && echo -n >>${INC} " comment \\\"!knock port \(ports ${ports}\): round ${round}\\\""
-	echo    >>${INC} ""
+	INPUT="${INPUT} update @${KNOCK_STATUS} { ${KEY} . ${next} timeout ${timeout_knock} }"
+	[ ${round} -eq ${last} ] && INPUT="${INPUT} log prefix \\\"Port knock for ${ports_caption} ${ports} accepted: \\\""
+	INPUT="${INPUT} ${COUNTER} return ${COMMENT}\n"
 
 	# Abort sequence if wrong port. The STATUS_IN_PROGRESS will block a new sequence until the blacklist timeout
 	if [ ${round} -ne  1 ]; then
-		echo -n >>${INC} "nft add rule ${TABLE} ${KNOCK_WAN_CHAIN}"
-		echo -n >>${INC} " delete @${KNOCK_STATUS} { ip saddr . ${idx} . ${round} }"
-		[ ${COMMENTS} -eq 1 ] && echo -n >>${INC} " comment \\\"!knock \(port ${ports}\): round ${round} , abort sequence\\\""
-		echo    >>${INC} ""
+		[ ${COMMENTS} -eq 1 ] && COMMENT="comment \\\"${COMMENT_PREFIX}: round ${round} , abort sequence\\\""
+		INPUT="${INPUT}\t\tdelete @${KNOCK_STATUS} { ${KEY} . ${round} } ${COMMENT}\n"
 	fi
 }
 
@@ -155,15 +144,23 @@ count_knock_ports() {
 }
 
 add_port() {
-	[ -z "${ports}" ] && ports=$1 || ports="${ports},$1"
+	if [ -z "${ports}" ]; then
+		ports=$1
+		ports_caption="port"
+	else
+		ports="${ports},$1"
+		ports_caption="ports"
+	fi
 }
 
 add_knock_rules() {
 	local action
 	local chain
 	local section_id=$1
+	local COMMENT=""
 
 	idx=$(expr ${idx} + 1)
+	KEY="ip saddr . ${idx}"
 
 	config_get enabled         ${section_id} enabled 1
 	config_get type            ${section_id} type
@@ -178,14 +175,16 @@ add_knock_rules() {
 	# Make sure we have at least one port
 	[ -z "${ports}" ] && return 
 
-
 	if [ "${type}" == "ping" ]; then
 		# Ping knock
+		COMMENT_PREFIX="!knock ping (${ports_caption} ${ports})"
 		add_knock_ping_rules ${section_id}
 
 	else
 		#Port knock
-	        last=0
+		COMMENT_PREFIX="!knock port (${ports_caption} ${ports})"
+
+		last=0
 		config_list_foreach $1 knock_port count_knock_ports
 		
 		knock_except_ports="";
@@ -199,66 +198,65 @@ add_knock_rules() {
 	if [ "${target}" == "redirect" ]; then
 		config_get dest_ip   ${section_id} dest_ip
 		config_get dest_port ${section_id} dest_port
-		chain="${KNOCK_DNAT_CHAIN}"
+		chain=DNAT
 		action="dnat ip to ${dest_ip}:${dest_port}"
 	else
-		chain="${KNOCK_WAN_CHAIN}"
+		chain=INPUT
 		action="accept"
 	fi
 
-	echo -n >>${INC} "nft add rule ${TABLE} ${chain}"
-	echo -n >>${INC} " tcp dport { ${ports} }"
-	echo -n >>${INC} " ip saddr . ${idx} . ${STATUS_ACCEPTED} @${KNOCK_STATUS}"
-	echo -n >>${INC} " update @${KNOCK_STATUS} { ip saddr . ${idx} . ${STATUS_ACCEPTED} timeout ${timeout_connect} }"
-	[ ${COUNTER}  -eq 1 ] && echo -n >>${INC} " counter"
-	echo -n >>${INC} " ${action}"
-	[ ${COMMENTS} -eq 1 ] && echo -n >>${INC} " comment \\\"!knock ${type} \(ports ${ports}\): accept\\\""
-	echo    >>${INC} ""
+	key="ip saddr . ${idx} . ${STATUS_ACCEPTED}"
+
+	[ ${COMMENTS} -eq 1 ] &&  COMMENT="comment \\\"!knock ${type} (${ports_caption} ${ports}): accept\\\""
+	RULE="\t\ttcp dport { ${ports} } ${key} @${KNOCK_STATUS} "
+	[ "${timeout_connect}" == "" -o "${timeout_connect}" == "0s" ] \
+		 && RULE="${RULE} delete @${KNOCK_STATUS} { ${key} } " \
+		 || RULE="${RULE} update @${KNOCK_STATUS} { ${key} timeout ${timeout_connect} } "
+	RULE="${RULE} ${COUNTER} ${action} ${COMMENT}\n"
+	# Insert rule at the beginning
+	eval ${chain}="\${RULE}\${${chain}}"
+}
+
+add_jump() {
+	RULES="${RULES}
+COMMENT=\"comment \\\"!knock: $2 rules\\\"\"; RULES=\$(nft list chain ${TABLE} $1)
+[ \"\${RULES}\" == \"\${RULES#*\${COMMENT}}\" ] && nft insert rule ${TABLE} $1 $4 jump $3 \${COMMENT}
+"
 }
 
 generate_rules() {
-	echo >${INC}
+	local WAN_IF_COND=""
+
 	idx=0
-
-	# wan input chain
-	echo    >>${INC} "nft list chain ${TABLE} ${KNOCK_WAN_CHAIN} >/dev/null 2>&1"
-	echo    >>${INC} "if [ \$? -ne 0 ]; then"
-	echo    >>${INC} "  nft add chain ${TABLE} ${KNOCK_WAN_CHAIN}"
-	echo -n >>${INC} "  nft insert rule ${TABLE} input_wan jump ${KNOCK_WAN_CHAIN}"
-	echo    >>${INC}   " comment \\\"!knock: input rules\\\""
-	echo    >>${INC} "else"
-	echo    >>${INC} "  nft flush chain ${TABLE} ${KNOCK_WAN_CHAIN}"
-	echo    >>${INC} "fi"
-
-	# DNAT chain
-	echo    >>${INC} "nft list chain ${TABLE} ${KNOCK_DNAT_CHAIN} >/dev/null 2>&1"
-	echo    >>${INC} "if [ \$? -ne 0 ]; then"
-	echo    >>${INC} "  nft add chain ${TABLE} ${KNOCK_DNAT_CHAIN}"
-	echo -n >>${INC} "  nft insert rule ${TABLE} dstnat_wan jump ${KNOCK_DNAT_CHAIN}"
-	echo    >>${INC}   " comment \\\"!knock: dnat rules\\\""
-	echo    >>${INC} "else"
-	echo    >>${INC} "  nft flush chain ${TABLE} ${KNOCK_DNAT_CHAIN}"
-	echo    >>${INC} "fi"
-
-	# ping input chain, must be before accept related if ping is accepted
-	echo    >>${INC} "nft list chain ${TABLE} ${KNOCK_PING_CHAIN} >/dev/null 2>&1"
-	echo    >>${INC} "if [ \$? -ne 0 ]; then"
-	echo    >>${INC} "  nft add chain ${TABLE} ${KNOCK_PING_CHAIN}"
-	echo    >>${INC} "  nft insert rule ${TABLE} input icmp type echo-request iifname ${WAN_IFNAME} jump ${KNOCK_PING_CHAIN}"
-	echo    >>${INC} "else"
-	echo    >>${INC} "  nft flush chain ${TABLE} ${KNOCK_PING_CHAIN}"
-	echo    >>${INC} "fi"
-
-	# Sets
-	echo -n >>${INC} "nft add set ${TABLE} ${KNOCK_STATUS} { typeof ip saddr . arp hlen . arp hlen\; flags timeout\; size 256\;"
-	echo    >>${INC} " comment \\\"!knock: Status per source ip\\\"\; }"
-	echo    >>${INC} "nft flush set ${TABLE} ${KNOCK_STATUS}"
-	echo -n >>${INC} "nft add set ${TABLE} ${KNOCK_CODES} { typeof arp hlen . arp hlen . meta length\; flags timeout\; size 256\;"
-	echo    >>${INC} " comment \\\"!knock: Current code\\\"\; }"
-	echo    >>${INC} "nft flush set ${TABLE} ${KNOCK_CODES}"
-
 	config_load fwknock
 	config_foreach add_knock_rules knock
+	
+	RULES="#Generated by /etc/init.d/fwknock\n"
+	for chain in ${KNOCK_WAN_CHAIN} ${KNOCK_DNAT_CHAIN} ${KNOCK_PING_CHAIN}; do
+		RULES="${RULES}nft flush chain ${TABLE} ${chain} 2>/dev/null\n"
+	done
+	for set in ${KNOCK_STATUS}  ${KNOCK_CODES}; do
+		RULES="${RULES}nft flush set ${TABLE} ${set} 2>/dev/null\n"
+	done
+
+	[ ! -z "${CODES}" ] && CODES="elements = { ${CODES} }; "
+	RULES="${RULES}
+nft \"table ${TABLE} {
+	set ${KNOCK_STATUS} { typeof ip saddr . arp hlen . arp hlen; flags timeout; size 256; \\
+				comment \\\"!knock: Status per source ip\\\"; }
+	set ${KNOCK_CODES} { typeof arp hlen . arp hlen . meta length; flags timeout; size 256; \\
+				comment \\\"!knock: Current code\\\"; ${CODES} }
+	chain ${KNOCK_WAN_CHAIN} {\n${INPUT}\t}
+	chain ${KNOCK_PING_CHAIN} {\n${PING}\t}
+	chain ${KNOCK_DNAT_CHAIN} {\n${DNAT}\t}
+}\"
+
+"
+
+	[ ! -z "${WAN_IFNAME}" ] && WAN_IF_COND="iifname ${WAN_IFNAME}"
+	add_jump input_wan  input ${KNOCK_WAN_CHAIN}
+	add_jump dstnat_wan dnat  ${KNOCK_DNAT_CHAIN}
+	add_jump input      ping  ${KNOCK_PING_CHAIN} "icmp type echo-request ${WAN_IF_COND}"
 }
 
 reload_service() {
@@ -270,7 +268,17 @@ service_triggers() {
 }
 
 start_service() {
-	generate_rules
+	RULES=""
+	INPUT=""
+	DNAT=""
+	PING=""
+	CODES=""
+
+	echo "Generating rules for firewall knocking"
+	generate_rules run
+
+	mkdir -p ${INC%/*}
+	echo -e >${INC} "${RULES}"
 
 	config_load firewall
 	config_get path fwknock path
@@ -280,7 +288,7 @@ start_service() {
 		uci_set firewall fwknock fw4_compatible 1
 		uci_commit
 	fi
-
+ 
 	[ ${RUN_INCLUDE} -eq 1 ] && sh ${INC}
 
 	if [ ${RUN_OTP_DAEMON} -ne 0 ]; then
