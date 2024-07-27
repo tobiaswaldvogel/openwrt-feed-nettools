@@ -14,15 +14,16 @@ SHARED_LIB_FLAGS = \
     -nostartfiles
 
 DEPS = \
-    -lnftnl \
     -lmnl
 
-all: nftables.so
+all: nftables.so nft-rule-get
 .PHONY: all clean
 
 nftables.so: nftables.o
 	$(CC) $(CFLAGS) $(SHARED_LIB_FLAGS) $(DEPS) $^ -o $@
 
+nft-rule-get: nft-rule-get.o
+	$(CC) $(CFLAGS) $(DEPS) $^ -o $@
 clean:
 	-rm -f *.so
 	-rm -f *.o
