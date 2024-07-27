@@ -515,16 +515,6 @@ static int nftables_read_rule_counter_cb(const struct nlmsghdr *nlh, void *ctx)
     return (flags & NLM_F_MULTI) ? MNL_CB_OK : MNL_CB_STOP;
   }
 
-
-
-
-
-
-
-
-
-
-
   /* Update rule query */
   for (ctr = ctrs_rule; ctr < ctrs_rule + ctrs_rule_len; ctr++) {
 	  if (comment->len != ctr->name_len ||
