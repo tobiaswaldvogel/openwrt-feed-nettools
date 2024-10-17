@@ -6,6 +6,8 @@ In case of using TOTP the nftables set holding the codes is updated periodically
 collectd plugin for collecting statistics from nftables counters
 - luci-app-statistics-nftables  
 Configuration and Graph definition for Luci statistics
+- luci-mod-status-plc
+Status page for Qualcom PLC (powerline communication) devices
 ## Luci statistics plugin
 Will be included soon  
 The graph definition works already but I still need to write the package and configuration definition

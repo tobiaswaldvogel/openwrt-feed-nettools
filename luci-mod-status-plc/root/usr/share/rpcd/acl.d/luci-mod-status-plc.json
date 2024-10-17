@@ -1,0 +1,12 @@
+{
+	"luci-mode-status-plc": {
+		"description": "Get PLC (powerline communication) status for luci-mod-status-plc",
+		"read": {
+			"uci": [ "plc" ],
+			"file": {
+				"/usr/bin/plctool *" : [ "exec" ],
+				"/usr/bin/chkpib *" : [ "exec" ]
+			}
+		}
+	}
+}
