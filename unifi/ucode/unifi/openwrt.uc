@@ -258,6 +258,220 @@ function sync_wpa_psks(API, cfg, systemcfg, confdir, savedir) {
 	return true;
 }
 
+// Radio settings from the controller (radio.N.*, with phyname = the local
+// wifi-device name), applied when enabled per instance:
+//   option radio_sync '1'   (default: off)
+// Applied are the channel (or 'auto'), for 'auto' the allowed channels
+// (all available ones minus the controller's blklst) and DFS usage, the
+// channel width (keeping the local htmode family HT/VHT/HE/EHT) and the
+// transmit power.
+const TRUE_VALUES = [ '1', 'true', 'yes', 'on', 'enabled' ];
+const HT_MAX_WIDTH = { HT: 40, VHT: 160, HE: 160, EHT: 320 };
+
+/* ---------------------------------------------------------------------- */
+/* radio capabilities, probed once per phy                                */
+/* ---------------------------------------------------------------------- */
+
+let phy_caps = {};
+
+function popcount(n) {
+	let c = 0;
+	for (; n > 0; n >>= 1)
+		c += n & 1;
+	return c;
+}
+
+function cmd_output(cmd) {
+	const p = popen(cmd);
+	if (!p)
+		return '';
+	const out = p.read('all') ?? '';
+	p.close();
+	return out;
+}
+
+// { phy, channels[], has_dfs, nss, min_txpower, max_txpower, htmodes[] }
+// for the radio of a wireless interface, or null if it isn't up.
+//  - channels: supported in the regulatory domain. The per-channel
+//    'restricted'/flags of iwinfo are not used: they are unreliable on
+//    some builds (e.g. the operating channel itself reported as no_ir),
+//    and hostapd enforces the regulatory rules anyway.
+//  - nss: spatial streams = configured TX antennas, else the highest
+//    HT MCS index (8 per stream)
+function radio_caps(API, ifname) {
+	const info = API.ubus.call('iwinfo', 'info', { device: ifname });
+	const phy = info?.phy;
+	if (!phy)
+		return null;
+
+	if (phy_caps[phy])
+		return phy_caps[phy];
+
+	let caps = { phy, htmodes: info.htmodes ?? [], nss: 1 };
+
+	const fl = API.ubus.call('iwinfo', 'freqlist', { device: ifname });
+	caps.channels = map(fl?.results ?? [], f => f.channel);
+	caps.has_dfs = length(filter(caps.channels, c => c >= 52 && c <= 144)) > 0;
+
+	const iw = cmd_output(`iw phy ${phy} info 2>/dev/null`);
+	const ant = match(iw, /Configured Antennas: TX 0x([0-9a-fA-F]+)/) ?? match(iw, /Available Antennas: TX 0x([0-9a-fA-F]+)/);
+	const mcs = match(iw, /HT TX\/RX MCS rate indexes supported: 0-([0-9]+)/);
+	if (ant && popcount(hex(ant[1])) > 0)
+		caps.nss = popcount(hex(ant[1]));
+	else if (mcs)
+		caps.nss = int((+mcs[1] + 1) / 8) || 1;
+
+	let dbm = [];
+	for (let l in split(cmd_output(`iwinfo ${ifname} txpowerlist 2>/dev/null`), '\n')) {
+		const m = match(l, /^[ \t*]*([0-9]+) dBm/);
+		if (m)
+			push(dbm, +m[1]);
+	}
+	if (length(dbm)) {
+		caps.min_txpower = min(...dbm);
+		caps.max_txpower = max(...dbm);
+	}
+
+	// only cache complete results, a radio coming up may lack some
+	if (length(caps.channels) && length(dbm))
+		phy_caps[phy] = caps;
+
+	return caps;
+}
+
+// caps of a wifi-device (via its first interface that is up)
+function device_caps(API, wstat, radio) {
+	for (let iface in (wstat?.[radio]?.interfaces ?? [])) {
+		const ifname = iface.ifname ?? iface.config?.ifname;
+		const caps = ifname ? radio_caps(API, ifname) : null;
+		if (caps)
+			return caps;
+	}
+
+	return null;
+}
+
+function has_htmode(caps, re) {
+	return length(filter(caps?.htmodes ?? [], m => match(m, re))) > 0;
+}
+
+// Transmit power for the controller's txpower / txpower_mode: a number is
+// used as is (clamped to the radio's range), 'auto'/'high' leave it to the
+// driver (maximum), 'medium'/'low' are 3/6 dB below the maximum.
+function txpower_wanted(systemcfg, pfx, caps) {
+	const tp = systemcfg[pfx + 'txpower'];
+	const mode = systemcfg[pfx + 'txpower_mode'];
+
+	if (tp != null && match(tp, /^[0-9]+$/)) {
+		let v = +tp;
+		if (caps?.max_txpower != null)
+			v = min(max(v, caps.min_txpower), caps.max_txpower);
+		return '' + v;
+	}
+
+	if ((mode == 'medium' || mode == 'low') && caps?.max_txpower != null)
+		return '' + max(caps.max_txpower - ((mode == 'low') ? 6 : 3), caps.min_txpower);
+
+	return null;
+}
+
+// desired wifi-device options for one controller radio; null to leave
+// the radio alone, { error } if the controller setting can't be applied
+function radio_wanted(systemcfg, pfx, cur, caps) {
+	const chan = systemcfg[pfx + 'channel'];
+	if (chan == null)
+		return null;
+
+	const valid = length(caps?.channels) ? caps.channels : null;
+	let want = {};
+
+	if (chan == 'auto' || chan == '0') {
+		want.channel = 'auto';
+		want.channels = null;
+
+		const blk = map(filter(split(systemcfg[pfx + 'blklst'] ?? '', ','), length), c => +c);
+		if (length(blk) && valid) {
+			const allowed = filter(valid, c => !(c in blk));
+			if (length(allowed))
+				want.channels = map(allowed, c => '' + c);
+		}
+
+		want.acs_exclude_dfs = (systemcfg[pfx + 'acsdfs'] == 'disabled') ? '1' : null;
+	} else {
+		if (!match(chan, /^[0-9]+$/) || (valid && !(+chan in valid)))
+			return { error: `channel ${chan} is not available` };
+
+		want.channel = chan;
+		want.channels = null;
+		want.acs_exclude_dfs = null;
+	}
+
+	const w = match(systemcfg[pfx + 'ieee_mode'] ?? '', /(20|40|80|160|320)(plus|minus)?$/);
+	const fam = match(cur.htmode ?? '', /^([A-Z]+)[0-9]/);
+	if (w && fam && HT_MAX_WIDTH[fam[1]] && +w[1] <= HT_MAX_WIDTH[fam[1]])
+		want.htmode = fam[1] + w[1];
+
+	if (systemcfg[pfx + 'txpower'] != null || systemcfg[pfx + 'txpower_mode'] != null)
+		want.txpower = txpower_wanted(systemcfg, pfx, caps);
+
+	return want;
+}
+
+function sync_radios(API, cfg, systemcfg) {
+	if (!(cfg.radio_sync in TRUE_VALUES))
+		return false;
+
+	let idxs = [];
+	for (let key in keys(systemcfg)) {
+		const m = match(key, /^radio\.([0-9]+)\.phyname$/);
+		if (m)
+			push(idxs, +m[1]);
+	}
+	sort(idxs);
+
+	const ctx = uci.cursor();
+	const wstat = API.ubus.call('network.wireless', 'status');
+	let changed = false;
+
+	for (let idx in idxs) {
+		const pfx = `radio.${idx}.`;
+		const radio = systemcfg[pfx + 'phyname'];
+		const cur = ctx.get_all('wireless', radio);
+
+		if (cur?.['.type'] != 'wifi-device' || systemcfg[pfx + 'status'] == 'disabled')
+			continue;
+
+		const want = radio_wanted(systemcfg, pfx, cur, device_caps(API, wstat, radio));
+		if (!want)
+			continue;
+
+		if (want.error) {
+			warn(`unifi: ${radio}: ${want.error}, keeping the local channel\n`);
+			continue;
+		}
+
+		for (let opt, val in want) {
+			if (sprintf('%J', cur[opt] ?? null) == sprintf('%J', val))
+				continue;
+
+			API.dbg(`unifi: ${radio}: ${opt} ${cur[opt] ?? '-'} -> ${val ?? '-'}\n`);
+			if (val == null)
+				ctx.delete('wireless', radio, opt);
+			else
+				ctx.set('wireless', radio, opt, val);
+			changed = true;
+		}
+	}
+
+	if (!changed)
+		return false;
+
+	ctx.commit('wireless');
+	warn('unifi: radio settings updated from controller\n');
+	system('wifi reload');
+	return true;
+}
+
 function on_system_cfg(API, cfg, systemcfg) {
 	vap_id = {};
 
@@ -275,6 +489,7 @@ function on_system_cfg(API, cfg, systemcfg) {
 	}
 
 	sync_wpa_psks(API, cfg, systemcfg);
+	sync_radios(API, cfg, systemcfg);
 }
 
 function ipv4_to_int(ip) {
@@ -770,7 +985,7 @@ function mhz_to_chwidth(mhz) {
         }
 }
 
-function get_wireless_data(API, all_devices, with_scan) {
+function get_wireless_data(API, cfg, all_devices, with_scan) {
 	let vap_table = [];
 	let radio_table = [];
 	const wstat = API.ubus.call('network.wireless', 'status');
@@ -781,6 +996,19 @@ function get_wireless_data(API, all_devices, with_scan) {
 		const band = radio_data.config.band;
 		const radio_type = band_to_radio_type(band);
 		const htmode = match(radio_data.config.htmode, /[0-9]+/);
+
+		// operating channel and transmit power, which differ from the
+		// config with 'auto' / no txpower set
+		let op_channel = radio_data.config.channel;
+		let op_txpower = radio_data.config.txpower;
+		for (let iface in radio_data.interfaces) {
+			const info = API.ubus.call('iwinfo', 'info', { device: iface.ifname ?? iface.config.ifname });
+			if (info?.channel) {
+				op_channel = info.channel;
+				op_txpower = info.txpower ?? op_txpower;
+				break;
+			}
+		}
 
 		let radio_satisfaction = 0;
 		let num_radio_satisfaction = 0;
@@ -875,8 +1103,8 @@ function get_wireless_data(API, all_devices, with_scan) {
 				name: ifname,
 				essid: iface.config.ssid,
 				id: id,
-				channel: radio_data.config.channel,
-				tx_power: radio_data.config.txpower,
+				channel: op_channel,
+				tx_power: op_txpower,
 				radio: radio_type,
 				num_sta: num_sta,
 				num_satisfaction_sta: num_sta,
@@ -915,28 +1143,62 @@ function get_wireless_data(API, all_devices, with_scan) {
 		radio_satisfaction = num_radio_satisfaction ? radio_satisfaction / num_radio_satisfaction : 100;
 		total_satisfaction += radio_satisfaction;
 
+		let wstat_radio = {};
+		wstat_radio[radio] = radio_data;
+		const caps = device_caps(API, wstat_radio, radio);
+
+		// The controller derives the radio description ("2x2 WiFi 4") from
+		// nss and the selectable channels from has_dfs/has_fccdfs (without
+		// them only the non-DFS channels are offered).
 		let radio_item = {
 			antenna_id: 0,
 			antenna_gain: 0,
 			builtin_ant_gain: 0,
 			builtin_antenna: true,
-			max_txpower: radio_data.config.txpower,
-			min_txpower: radio_data.config.txpower,
+			current_antenna_gain: 0,
+			max_txpower: caps?.max_txpower ?? +radio_data.config.txpower,
+			min_txpower: caps?.min_txpower ?? +radio_data.config.txpower,
+			nss: caps?.nss ?? 1,
 			name: radio,
 			radio: radio_type,
 			scan_table: [],
 		};
 
-		if (band == '5g') {
-			radio_item.is_11ac = true;
-			radio_item.has_ht160 = true;
-		} else if (band == '6g') {
-			// NOTE: unverified -- see band_to_radio_type() above. 6GHz
-			// mandates 802.11ax/be, not ac, so is_11ac is deliberately
-			// left unset here; is_11ax/is_11be would be more correct but
-			// I don't know what UniFi actually expects on this field for
-			// 6E radios without a real device to check against.
-			radio_item.has_ht160 = true;
+		if (band != '2g') {
+			radio_item.has_dfs = caps?.has_dfs ?? false;
+			radio_item.has_fccdfs = radio_item.has_dfs;
+		}
+
+		// a real device only reports the flags that are set
+		const is_11ac = caps ? has_htmode(caps, /^VHT/) : (band == '5g');
+		const flags = {
+			is_11ac,
+			is_11ax: has_htmode(caps, /^HE/),
+			is_11be: has_htmode(caps, /^EHT/),
+			has_ht160: has_htmode(caps, /160$/),
+		};
+		for (let k, v in flags)
+			if (v)
+				radio_item[k] = true;
+
+		// Supported 802.11 modes, matching a real UAP-IW-HD (ng: 10,
+		// na: 21): 1 = a, 2 = b, 4 = n (5 GHz), 8 = n (2.4 GHz), 16 = ac
+		radio_item.ieee_modes = (band == '2g')
+			? 2 | (has_htmode(caps, /^HT/) || !caps ? 8 : 0)
+			: 1 | (has_htmode(caps, /^HT/) || !caps ? 4 : 0) | (is_11ac ? 16 : 0);
+
+		// Capability bitfields, defaulting to the values of a real
+		// UAP-IW-HD (from mca-dump), overridable per radio type, e.g.
+		// option radio_caps_na '...'. The controller uses them, together
+		// with nss, for the radio description and the selectable channels.
+		const RADIO_CAPS_DEFAULT = {
+			ng: { radio_caps: 147476, radio_caps2: 11 },
+			na: { radio_caps: 251805700, radio_caps2: 11 },
+		};
+		for (let k in [ 'radio_caps', 'radio_caps2' ]) {
+			const v = cfg?.[`${k}_${radio_type}`] ?? RADIO_CAPS_DEFAULT[radio_type]?.[k];
+			if (v != null)
+				radio_item[k] = +v;
 		}
 
 		if (htmode)
@@ -1320,7 +1582,7 @@ function collect_data(API, cfg, data) {
 
 	data.port_table = get_port_data(API, cfg, all_devices);
 
-	const wdata = get_wireless_data(API, all_devices, false);
+	const wdata = get_wireless_data(API, cfg, all_devices, false);
 	data.radio_table = wdata.radio;
 	data.vap_table = wdata.vap;
 	data.satisfaction = wdata.satisfaction;
