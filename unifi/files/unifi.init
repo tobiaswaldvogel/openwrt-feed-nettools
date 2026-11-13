@@ -1,0 +1,44 @@
+#!/bin/sh /etc/rc.common
+START=99
+STOP=10
+BOOT_DELAY=60
+USE_PROCD=1
+
+UCODE_BIN="/usr/bin/ucode"
+UCODE_SCRIPT="/usr/share/ucode/unifi/unifi.uc"
+
+start_instance() {
+        local section="$1"
+        local enabled
+
+        config_get_bool enabled "$section" enabled 1
+        [ "$enabled" -eq 1 ] || return 0
+
+        procd_open_instance "$section"
+	procd_set_param command "$UCODE_BIN" "$UCODE_SCRIPT" "$section"
+        procd_set_param respawn 3600 5 5
+        procd_set_param stdout 1
+        procd_set_param stderr 1
+        procd_close_instance
+}
+
+start_service() {
+        config_load unifi
+        config_foreach start_instance instance_cfg
+}
+
+reload_service() {
+        stop
+        start
+}
+
+service_triggers() {
+        procd_add_reload_trigger "unifi"
+        procd_add_config_trigger "config.change" "unifi" /etc/init.d/unifi reload
+}
+
+boot() {
+    # Only runs at system boot. Fork so the rest of the boot
+    # sequence isn't blocked, then delay the real start.
+    ( sleep "$BOOT_DELAY"; start "$@" ) &
+}
