@@ -78,11 +78,32 @@ function wpa_psk_set(ctx, name, opt, value) {
 // scope are adjusted. Entries for unmanaged ifaces are left alone. Since
 // 'iface' holds a single interface, an entry that ends up valid for only
 // some of the ifaces is split into one entry per iface.
-function sync_wpa_psks(API, systemcfg, confdir, savedir) {
-	const unifi = get_wpa_psks(systemcfg);
-	if (!length(unifi))
+// Records the ifaces managed by the controller in a named section
+// ("config managed 'unifi'"), so the LuCI page can point them out
+// without needing access to the unifi config (which holds secrets).
+function wpa_psk_mark_managed(ctx, ifaces) {
+	const stype = ctx.get(WPA_PSK_CONFIG, 'unifi');
+
+	if (!length(ifaces)) {
+		if (stype == null)
+			return false;
+
+		ctx.delete(WPA_PSK_CONFIG, 'unifi');
+		return true;
+	}
+
+	const cur = ctx.get(WPA_PSK_CONFIG, 'unifi', 'iface');
+	if (stype == 'managed' && type(cur) == 'array' && join(' ', cur) == join(' ', ifaces))
 		return false;
 
+	ctx.delete(WPA_PSK_CONFIG, 'unifi');
+	ctx.set(WPA_PSK_CONFIG, 'unifi', 'managed');
+	ctx.set(WPA_PSK_CONFIG, 'unifi', 'iface', ifaces);
+	return true;
+}
+
+function sync_wpa_psks(API, systemcfg, confdir, savedir) {
+	const unifi = get_wpa_psks(systemcfg);
 	const ctx = uci.cursor(confdir, savedir);
 	if (!ctx.get_all(WPA_PSK_CONFIG))
 		return false;   // luci-mod-wifiext not installed
@@ -105,15 +126,14 @@ function sync_wpa_psks(API, systemcfg, confdir, savedir) {
 				want[s.ifname][e.psk] = e.vid ?? '';
 	});
 
-	if (!length(want))
-		return false;
+	// without managed ifaces the loops below leave everything unchanged
+	let changed = wpa_psk_mark_managed(ctx, sort(keys(want)));
 
 	let entries = [];
 	ctx.foreach(WPA_PSK_CONFIG, 'wifi-psk', s => push(entries, s));
 
 	let covered = {};    // ifname -> { psk: true }
 	let added = [];
-	let changed = false;
 
 	for (let e in entries) {
 		const name = e['.name'];
