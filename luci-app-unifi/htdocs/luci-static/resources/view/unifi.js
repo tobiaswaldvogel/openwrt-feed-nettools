@@ -100,7 +100,7 @@ return view.extend({
 		s.tab('device', _('Device'));
 		s.tab('switch', _('Switch'));
 		s.tab('gateway', _('Gateway'));
-		s.tab('wireless', _('Wireless PSKs'));
+		s.tab('wireless', _('Wireless'));
 
 		let o;
 
@@ -272,7 +272,15 @@ return view.extend({
 			o.modalonly = true;
 		}
 
-		/* wireless PSKs */
+		/* wireless: radio settings */
+
+		o = s.taboption('wireless', form.Flag, 'radio_sync', _('Use controller radio settings'),
+			_('Apply the radio settings of the controller to the local radios: channel (or automatic selection with the allowed channels and DFS usage), channel width and transmit power. Changes restart the affected radios, which briefly disconnects their clients.'));
+		o.depends('provider', 'openwrt');
+		o.depends('provider', '');
+		o.modalonly = true;
+
+		/* wireless: PSKs */
 
 		o = s.taboption('wireless', form.Flag, 'psk_sync', _('Use controller PSKs'),
 			has_wireless_psk
