@@ -102,8 +102,31 @@ function wpa_psk_mark_managed(ctx, ifaces) {
 	return true;
 }
 
-function sync_wpa_psks(API, systemcfg, confdir, savedir) {
-	const unifi = get_wpa_psks(systemcfg);
+// Instance options (see luci-app-unifi):
+//   option psk_sync '0'      disable the sync completely (default: enabled)
+//   list psk_ssid '<ssid>'   only sync these SSIDs (default: all SSIDs of
+//                            the controller that also exist locally)
+// SSIDs no longer synced keep their last synced entries as local config.
+function wpa_psk_selected(cfg, systemcfg) {
+	const psks = get_wpa_psks(systemcfg);
+
+	if (cfg.psk_sync in [ '0', 'false', 'no', 'off', 'disabled' ])
+		return {};
+
+	if (cfg.psk_ssid == null)
+		return psks;
+
+	const allowed = (type(cfg.psk_ssid) == 'array') ? cfg.psk_ssid : [ cfg.psk_ssid ];
+	let selected = {};
+	for (let ssid, list in psks)
+		if (ssid in allowed)
+			selected[ssid] = list;
+
+	return selected;
+}
+
+function sync_wpa_psks(API, cfg, systemcfg, confdir, savedir) {
+	const unifi = wpa_psk_selected(cfg, systemcfg);
 	const ctx = uci.cursor(confdir, savedir);
 	if (!ctx.get_all(WPA_PSK_CONFIG))
 		return false;   // luci-mod-wifiext not installed
@@ -251,7 +274,7 @@ function on_system_cfg(API, cfg, systemcfg) {
 		idx++;
 	}
 
-	sync_wpa_psks(API, systemcfg);
+	sync_wpa_psks(API, cfg, systemcfg);
 }
 
 function ipv4_to_int(ip) {
