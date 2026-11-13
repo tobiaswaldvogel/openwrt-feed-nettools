@@ -57,6 +57,7 @@ define Package/unifi/install
 	$(INSTALL_BIN) ./ucode/unifi/netgear.uc $(1)/usr/share/ucode/unifi/netgear.uc
 	$(INSTALL_BIN) ./ucode/unifi/tplink.uc $(1)/usr/share/ucode/unifi/tplink.uc
 	$(INSTALL_BIN) ./ucode/unifi/openwrt.uc $(1)/usr/share/ucode/unifi/openwrt.uc
+	$(INSTALL_BIN) ./ucode/unifi/openwrt_gw.uc $(1)/usr/share/ucode/unifi/openwrt_gw.uc
 
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/unifi.init $(1)/etc/init.d/unifi
