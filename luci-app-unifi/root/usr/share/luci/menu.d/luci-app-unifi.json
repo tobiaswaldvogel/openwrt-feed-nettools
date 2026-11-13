@@ -1,0 +1,13 @@
+{
+	"admin/services/unifi": {
+		"title": "UniFi",
+		"action": {
+			"type": "view",
+			"path": "unifi"
+		},
+		"depends": {
+			"acl": [ "luci-app-unifi" ],
+			"uci": { "unifi": true }
+		}
+	}
+}

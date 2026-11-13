@@ -8,6 +8,12 @@ collectd plugin for collecting statistics from nftables counters
 Configuration and Graph definition for Luci statistics
 - luci-mod-status-plc
 Status page for Qualcom PLC (powerline communication) devices
+- unifi  
+UniFi inform-protocol device emulator: OpenWrt access points/routers and TP-Link/Netgear switches show up in, and can be managed by, a UniFi Network controller. WPA PSKs (incl. private PSKs with VLAN) of the controller are synced into the luci-mod-wifiext PSK configuration
+- luci-app-unifi  
+Configuration and status page for the unifi emulator, incl. the selection of SSIDs using controller managed PSKs
+- luci-mod-wifiext  
+Wireless VLAN and per-client PSK (wpa_psk_file with dynamic VLAN) management
 ## Luci statistics plugin
 Will be included soon  
 The graph definition works already but I still need to write the package and configuration definition

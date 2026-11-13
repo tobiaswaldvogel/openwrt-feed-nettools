@@ -1,0 +1,14 @@
+{
+	"luci-app-unifi": {
+		"description": "Grant access to the UniFi device emulator configuration",
+		"read": {
+			"ubus": {
+				"service": [ "list" ]
+			},
+			"uci": [ "unifi", "wireless", "wireless_psk", "network" ]
+		},
+		"write": {
+			"uci": [ "unifi" ]
+		}
+	}
+}
