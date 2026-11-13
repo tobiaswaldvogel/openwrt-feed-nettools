@@ -13,14 +13,14 @@
 	},
 
 	"admin/network/wireless_psk": {
-		"title": "Wireless PSK",
+		"title": "Wireless PSKs",
 		"order": 17,
 		"action": {
 			"type": "view",
 			"path": "network/wireless_psk"
 		},
 		"depends": {
-			"acl": [ "luci-mod-network-config" ],
+			"acl": [ "luci-mod-wifiext" ],
 			"uci": { "wireless": { "@wifi-device": true } }
 		}
 	}

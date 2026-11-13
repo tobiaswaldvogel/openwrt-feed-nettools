@@ -34,14 +34,42 @@ write_psk() {
 	printf '%s\n' "${line}" >>${psk_file}
 }
 
+# hostapd rejects the whole PSK file on the first invalid line, so
+# never write one: passphrase 8..63 chars or 64 hex digits
+valid_psk() {
+	local len=${#1}
+
+	[ ${len} -ge 8 -a ${len} -le 63 ] && return 0
+	[ ${len} -eq 64 ] || return 1
+	case "$1" in *[!0-9a-fA-F]*) return 1;; esac
+	return 0
+}
+
 add_psk() {
-	local vid mac psk comment
+	local vid mac psk comment iface
 
 	config_get vid $1 vid
 	config_get mac $1 mac "00:00:00:00:00:00"
 	config_get psk $1 psk
 	config_get comment $1 comment
 	config_get iface $1 iface
+
+	if ! valid_psk "${psk}"; then
+		logger -t wireless_psk "skipping '${comment:-$1}': invalid passphrase"
+		return
+	fi
+
+	case "${vid}" in
+		*[!0-9]*)
+			logger -t wireless_psk "skipping '${comment:-$1}': invalid VLAN id '${vid}'"
+			return
+			;;
+	esac
+
+	if ! echo "${mac}" | grep -qiE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; then
+		logger -t wireless_psk "skipping '${comment:-$1}': invalid MAC address '${mac}'"
+		return
+	fi
 
 	for psk_iface in ${PSK_IFACES}; do
 		[ -n "${iface}" -a "${iface}" != "${psk_iface}" ] && continue
