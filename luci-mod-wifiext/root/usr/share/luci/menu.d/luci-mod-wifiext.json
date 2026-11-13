@@ -1,0 +1,27 @@
+{
+	"admin/network/wireless_vlan": {
+		"title": "Wireless VLAN",
+		"order": 16,
+		"action": {
+			"type": "view",
+			"path": "network/wireless_vlan"
+		},
+		"depends": {
+			"acl": [ "luci-mod-network-config" ],
+			"uci": { "wireless": { "@wifi-device": true } }
+		}
+	},
+
+	"admin/network/wireless_psk": {
+		"title": "Wireless PSK",
+		"order": 17,
+		"action": {
+			"type": "view",
+			"path": "network/wireless_psk"
+		},
+		"depends": {
+			"acl": [ "luci-mod-network-config" ],
+			"uci": { "wireless": { "@wifi-device": true } }
+		}
+	}
+}

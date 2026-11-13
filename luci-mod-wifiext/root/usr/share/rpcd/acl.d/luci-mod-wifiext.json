@@ -1,0 +1,11 @@
+{
+	"luci-mod-wifiext": {
+		"description": "Grant access to wifi psk",
+		"read": {
+			"uci": [ "luci", "wireless_psk" ]
+		},
+		"write": {
+			"uci": [ "luci", "wireless_psk" ]
+		}
+	}
+}

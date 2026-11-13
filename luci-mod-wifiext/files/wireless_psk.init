@@ -1,0 +1,92 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2006 OpenWrt.org
+START=18
+CONFIG=wireless_psk
+USE_PROCD=1
+
+add_file() {
+	local psk_file ifname
+
+	config_get psk_file     $1 wpa_psk_file
+	config_get ifname       $1 ifname
+	config_get vlan		$1 dynamic_vlan 0
+
+	[ -z "${psk_file}" ] && return
+
+	if [ "${PSK_IFACES}" == "${PSK_IFACES#*$ifname}" ]; then
+		PSK_IFACES="${PSK_IFACES} ${ifname}"
+	fi
+
+	eval ${ifname}_vlan=${vlan}
+	eval ${ifname}_psk_file=${psk_file}
+}
+
+# write_psk <iface> <vid> <mac> <psk> [comment]
+write_psk() {
+	local psk_file vlan_mode line
+
+	eval psk_file=\${${1}_psk_file}
+	eval vlan_mode=\${${1}_vlan}
+
+	[ -n "$5" ] && printf '# %s\n' "$5" >>${psk_file}
+	line="$3 $4"
+	[ -n "$2" -a "${vlan_mode}" -ne 0 ] && line="vlanid=$2 ${line}"
+	printf '%s\n' "${line}" >>${psk_file}
+}
+
+add_psk() {
+	local vid mac psk comment
+
+	config_get vid $1 vid
+	config_get mac $1 mac "00:00:00:00:00:00"
+	config_get psk $1 psk
+	config_get comment $1 comment
+	config_get iface $1 iface
+
+	for psk_iface in ${PSK_IFACES}; do
+		[ -n "${iface}" -a "${iface}" != "${psk_iface}" ] && continue
+		write_psk ${psk_iface} "${vid}" "${mac}" "${psk}" "${comment}"
+	done
+}
+
+service_triggers() {
+	procd_add_reload_trigger "${CONFIG}"
+}
+
+clear_psk_files() {
+	for ifname in ${PSK_IFACES}; do
+		eval psk_file=\${${ifname}_psk_file}
+		echo -n >${psk_file}
+	done
+}
+
+finish_psk_files() {
+	for ifname in ${PSK_IFACES}; do
+		eval psk_file=\${${ifname}_psk_file}
+		echo -n "#" >>${psk_file}
+	done
+}
+
+start_service() {
+
+	PSK_FILES=""
+	PSK_IFACES=""
+	config_load wireless
+	config_foreach add_file wifi-iface
+
+	clear_psk_files
+
+	config_load ${CONFIG}
+	config_foreach add_psk wifi-psk
+
+	finish_psk_files
+}
+
+
+reload_service() {
+	start_service
+
+	for psk_iface in ${PSK_IFACES}; do
+		hostapd_cli -i ${psk_iface} reload_wpa_psk
+	done
+}
