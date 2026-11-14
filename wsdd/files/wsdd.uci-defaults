@@ -1,0 +1,10 @@
+#!/bin/sh
+# wsdd replaces wsdd2, which ksmbd-server pulls in unconditionally.
+# Both answer WS-Discovery on UDP 3702, so keep wsdd2 from starting.
+
+[ -x /etc/init.d/wsdd2 ] || exit 0
+
+/etc/init.d/wsdd2 stop
+/etc/init.d/wsdd2 disable
+
+exit 0
