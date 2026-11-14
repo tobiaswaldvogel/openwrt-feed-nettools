@@ -323,7 +323,7 @@ function radio_caps(API, ifname) {
 
 	let dbm = [];
 	for (let l in split(cmd_output(`iwinfo ${ifname} txpowerlist 2>/dev/null`), '\n')) {
-		const m = match(l, /^[ \t*]*([0-9]+) dBm/);
+		const m = match(l, /^[ \t*]*([0-9]+) dbm/i);
 		if (m)
 			push(dbm, +m[1]);
 	}
