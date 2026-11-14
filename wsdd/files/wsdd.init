@@ -1,0 +1,36 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2008 OpenWrt.org
+START=95
+USE_PROCD=1
+
+get_hostname() {
+	config_get HOSTNAME $1 hostname "OpenWrt"
+}
+
+globals() {
+	. /lib/functions/network.sh
+	config_get name        $1 name      ${HOSTNAME}
+	config_get workgroup   $1 workgroup WORKGROUP
+	network_get_ipaddr  ip "lan"
+
+	procd_open_instance
+	procd_set_param command /usr/sbin/wsdd -F -n $name -w $workgroup -i $ip
+	procd_set_param respawn
+	procd_close_instance
+}
+
+reload_service() {
+	restart_service
+}
+
+service_triggers() {
+	procd_add_reload_trigger "ksmbd"
+}
+
+start_service() {
+	config_load system
+	config_foreach get_hostname system
+
+	config_load ksmbd
+	config_foreach globals globals
+}
