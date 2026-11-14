@@ -310,27 +310,40 @@ function parse_inform_response(resp) {
 		return null;
 	}
 
-	if (flags & 0x1) {
-		const key_hex  = mgmtcfg.authkey ?? DEFAULT_KEY;
-		const iv_bytes = substr(resp, 16, 16);
+	try {
+		if (flags & 0x1) {
+			const key_hex  = mgmtcfg.authkey ?? DEFAULT_KEY;
+			const iv_bytes = substr(resp, 16, 16);
 
-		if (flags & 0x8) {
-			const aad = substr(resp, 0, 40);
-			const enc = substr(payload, 0, plen - 16);
-			const tag = substr(payload, plen - 16, 16);
-			payload = aes128_gcm_decrypt(enc, hex2bin(key_hex), iv_bytes, tag, aad);
-		} else {
-			payload = aes128_cbc_decrypt(payload, hex2bin(key_hex), iv_bytes, true);
+			if (flags & 0x8) {
+				if (plen < 16) {
+					warn(`unifi: GCM payload too short for tag (${plen} bytes)\n`);
+					return null;
+				}
+
+				const aad = substr(resp, 0, 40);
+				const enc = substr(payload, 0, plen - 16);
+				const tag = substr(payload, plen - 16, 16);
+				payload = aes128_gcm_decrypt(enc, hex2bin(key_hex), iv_bytes, tag, aad);
+			} else {
+				payload = aes128_cbc_decrypt(payload, hex2bin(key_hex), iv_bytes, true);
+			}
+
+			if (!payload) {
+				warn('unifi: failed to decrypt inform response (wrong authkey?)\n');
+				return null;
+			}
 		}
 
-		if (!payload)
-			return null;
+		if (flags & 0x2)
+			payload = inflate(payload);
+
+		return json(payload);
 	}
-
-	if (flags & 0x2)
-		payload = inflate(payload);
-
-	return json(payload);
+	catch (e) {
+		warn(`unifi: failed to parse inform response: ${e.message}\n`);
+		return null;
+	}
 }
 
 /* ---------------------------------------------------------------------- */
