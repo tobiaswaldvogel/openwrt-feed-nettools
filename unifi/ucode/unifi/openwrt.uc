@@ -1261,8 +1261,12 @@ function sta_deltas(sta) {
 	let prev = sta_prev[mac];
 	sta_prev[mac] = cur;
 
-	// new station or reassociated (counters restarted)
-	if (!prev || cur.packets < prev.packets || cur.rx_bytes < prev.rx_bytes)
+	// First sight: a station that connected only now counts from zero, one
+	// that was connected before (e.g. across a daemon restart) only sets the
+	// baseline, or its whole history would show up as one burst.
+	if (!prev)
+		prev = ((sta.connected_time ?? 0) > 120) ? cur : { retries: 0, packets: 0, failed: 0, rx_bytes: 0 };
+	else if (cur.packets < prev.packets || cur.rx_bytes < prev.rx_bytes)   // reassociated
 		prev = { retries: 0, packets: 0, failed: 0, rx_bytes: 0 };
 
 	const d = {
