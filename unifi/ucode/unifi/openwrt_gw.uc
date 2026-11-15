@@ -37,7 +37,7 @@
  * network instead.
  */
 
-import { readfile, popen, opendir, access } from 'fs';
+import { readfile, writefile, popen, opendir, access } from 'fs';
 import * as math from 'math';
 import * as uci from 'uci';
 
@@ -199,23 +199,142 @@ function ping_latency(host) {
 	return m ? +m[1] : null;
 }
 
-// Rough active-client count on a subnet from the kernel ARP cache.
-function count_clients(net_ip, masklen) {
+/* ------------------------------------------------------------------ */
+/* client hosts: present hosts from the ARP cache, named from DHCP     */
+/* leases (odhcpd via ubus, else dnsmasq's lease file) and static      */
+/* /etc/config/dhcp host sections. Reported per network as host_table, */
+/* which is how a USG hands the controller client IPs and hostnames.   */
+/* ------------------------------------------------------------------ */
+
+// mac -> epoch first seen, for host uptime. Persisted in /tmp so a daemon
+// restart doesn't reset every host to uptime 0, which the controller takes
+// as a fresh connect (EVT_LU_Connected) for each of them.
+const HOSTS_SEEN = '/tmp/unifi_gw_hosts_seen.json';
+let host_first_seen;
+
+function load_hosts_seen() {
+	if (host_first_seen)
+		return;
+	try { host_first_seen = json(readfile(HOSTS_SEEN) ?? '{}'); } catch (e) {}
+	if (type(host_first_seen) != 'object')
+		host_first_seen = {};
+}
+
+function save_hosts_seen(present) {
+	// drop hosts no longer present, so a returning host counts as new
+	let keep = {};
+	for (let h in present)
+		if (host_first_seen[h.mac])
+			keep[h.mac] = host_first_seen[h.mac];
+	host_first_seen = keep;
+	writefile(HOSTS_SEEN, sprintf('%J', keep));
+}
+
+function norm_mac(mac) {
+	mac = lc(mac ?? '');
+	if (match(mac, /^[0-9a-f]{12}$/))     // odhcpd reports MACs without colons
+		mac = join(':', map([ 0, 2, 4, 6, 8, 10 ], i => substr(mac, i, 2)));
+	return match(mac, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/) ? mac : null;
+}
+
+function valid_hostname(n) {
+	return (type(n) == 'string' && length(n) && n != '*') ? n : null;
+}
+
+// DHCP state: names (mac -> hostname) and the active leases as
+// [{ mac, ip, expiry }], expiry in epoch seconds or null for an infinite
+// lease. For names, later sources only fill gaps, so a name the client sent
+// in its DHCP request wins over a static host entry.
+function dhcp_state(API) {
+	let names = {}, leases = [];
+	const now = time();
+
+	function add_lease(mac, ip, expiry) {
+		mac = norm_mac(mac);
+		if (mac && ip)
+			push(leases, { mac, ip, expiry });
+	}
+
+	function add(mac, name) {
+		mac = norm_mac(mac);
+		name = valid_hostname(name);
+		if (mac && name && !names[mac])
+			names[mac] = name;
+	}
+
+	const odhcpd = API.ubus.call('dhcp', 'ipv4leases');
+	for (let dev, d in (odhcpd?.device ?? {}))
+		for (let l in (d?.leases ?? [])) {
+			add(l.mac, l.hostname);
+			// valid: remaining seconds, -1 for an infinite lease
+			if (l.valid != 0)
+				add_lease(l.mac, l.address, l.valid > 0 ? now + l.valid : null);
+		}
+
+	// dnsmasq: "<expiry> <mac> <ip> <hostname> <client-id>"
+	const dm = readfile('/tmp/dhcp.leases');
+	for (let line in split(dm ?? '', '\n')) {
+		const f = split(line, ' ');
+		if (length(f) >= 4) {
+			add(f[1], f[3]);
+			if (+f[0] == 0 || +f[0] > now)
+				add_lease(f[1], f[2], +f[0] || null);
+		}
+	}
+
+	try {
+		uci.cursor().foreach('dhcp', 'host', (s) => {
+			let macs = s.mac;
+			if (type(macs) == 'string')
+				macs = split(macs, /\s+/);
+			for (let m in (macs ?? []))
+				add(m, s.name);
+		});
+	} catch (e) {}
+
+	return { names, leases };
+}
+
+// Present IPv4 neighbours as [{ ip, mac }], from the kernel ARP cache.
+// Incomplete entries (flags 0x0) are skipped.
+function arp_hosts() {
 	const arp = readfile('/proc/net/arp');
-	if (!arp)
-		return 0;
-	let n = 0;
-	const lines = split(arp, '\n');
+	let out = [];
+	const lines = split(arp ?? '', '\n');
 	for (let i = 1; i < length(lines); i++) {
 		const f = filter(split(lines[i], ' '), x => length(x) > 0);
-		if (length(f) < 4)
+		if (length(f) < 4 || f[2] == '0x0')
 			continue;
-		if (f[2] == '0x0')      // incomplete ARP entry
-			continue;
-		if (ip_in_subnet(f[0], net_ip, masklen))
-			n++;
+		const mac = norm_mac(f[3]);
+		if (mac && mac != '00:00:00:00:00:00')
+			push(out, { ip: f[0], mac });
 	}
-	return n;
+	return out;
+}
+
+function build_host_table(hosts, names, net_ip, masklen) {
+	const now = time();
+	let table = [];
+	for (let h in hosts) {
+		if (!ip_in_subnet(h.ip, net_ip, masklen))
+			continue;
+		host_first_seen[h.mac] ??= now;
+		// hostname (not host_name) is what the controller copies into the
+		// client record, together with the dev_*/os_* fingerprint fields
+		let e = {
+			mac: h.mac,
+			ip: h.ip,
+			age: 0,
+			uptime: now - host_first_seen[h.mac],
+			authorized: true,
+			tx_bytes: 0, rx_bytes: 0,
+			tx_packets: 0, rx_packets: 0,
+		};
+		if (names[h.mac])
+			e.hostname = names[h.mac];
+		push(table, e);
+	}
+	return table;
 }
 
 /* ------------------------------------------------------------------ */
@@ -701,8 +820,11 @@ function dhcp_map() {
 	return m;
 }
 
-function build_network_table(cfg, dump, all_devices, wan) {
+function build_network_table(cfg, dump, all_devices, wan, dhcps) {
 	let networks = [];
+
+	load_hosts_seen();
+	const hosts = arp_hosts();
 
 	let eth_of = {};               // physical dev -> eth name
 	for (let p in cfg.gw_ports)
@@ -713,8 +835,9 @@ function build_network_table(cfg, dump, all_devices, wan) {
 	/* WAN */
 	if (wan.ip) {
 		let n = {
-			name: 'wan',
+			name: 'eth0',
 			ifname: 'eth0',
+			addresses: [ sprintf('%s/%d', wan.ip.ip, wan.ip.masklen) ],
 			purpose: 'wan',
 			up: true,
 			enable: true,
@@ -756,10 +879,16 @@ function build_network_table(cfg, dump, all_devices, wan) {
 		// otherwise fall back to the parent port's.
 		const st = dev_stats(all_devices, all_devices[l3] ? l3 : pdev);
 		const is_guest = match(iface.interface, /guest/i) ? true : false;
+		const host_table = build_host_table(hosts, dhcps.names, a.ip, a.masklen);
 
+		// The controller matches an entry to its network config by the first
+		// of 'addresses' and skips entries without it, host_table included.
+		// 'name' becomes the network's gateway_interface_name, as on a USG.
+		const ifname = vid ? sprintf('%s.%d', eth, vid) : eth;
 		let n = {
-			name: iface.interface,
-			ifname: vid ? sprintf('%s.%d', eth, vid) : eth,
+			name: ifname,
+			ifname: ifname,
+			addresses: [ sprintf('%s/%d', a.ip, a.masklen) ],
 			purpose: is_guest ? 'guest' : 'corporate',
 			is_guest: is_guest,
 			up: st.up,
@@ -768,9 +897,12 @@ function build_network_table(cfg, dump, all_devices, wan) {
 			ip: a.ip,
 			netmask: a.netmask,
 			ip_subnet: sprintf('%s/%d', a.ip, a.masklen),
-			num_sta: count_clients(a.ip, a.masklen),
-			rx_bytes: st.rx_bytes, tx_bytes: st.tx_bytes,
-			rx_packets: st.rx_packets, tx_packets: st.tx_packets,
+			num_sta: length(host_table),
+			host_table: host_table,
+			stats: {
+				rx_bytes: st.rx_bytes, tx_bytes: st.tx_bytes,
+				rx_packets: st.rx_packets, tx_packets: st.tx_packets,
+			},
 		};
 
 		if (vid) {
@@ -788,12 +920,21 @@ function build_network_table(cfg, dump, all_devices, wan) {
 			n.dhcpd_start = int_to_ip(base + d.start);
 			n.dhcpd_stop  = int_to_ip(base + d.start + d.limit - 1);
 			n.dhcpd_leasetime = leasetime_secs(d.leasetime);
+			// Active leases in the pool; the controller adds its own
+			// fixed-IP clients in the range and shows the pool usage.
+			const lo = base + d.start, hi = base + d.start + d.limit - 1;
+			n.active_dhcp_lease_count = length(filter(dhcps.leases, l => {
+				const v = ipv4_to_int(l.ip);
+				return v >= lo && v <= hi;
+			}));
 		} else if (d && d.ignore) {
 			n.dhcpd_enabled = false;
 		}
 
 		push(networks, n);
 	}
+
+	save_hosts_seen(hosts);
 
 	return networks;
 }
@@ -1016,8 +1157,27 @@ function collect_data(API, cfg, data) {
 
 	data.if_table = if_table;
 	data.port_table = port_table;
+	const dhcps = dhcp_state(API);
 	data.network_table = build_network_table(cfg, dump, all_devices,
-		{ name: cfg.wan_iface, iface: wan_iface, ip: wan_ip, gw: wan_gw, dns: wan_dns });
+		{ name: cfg.wan_iface, iface: wan_iface, ip: wan_ip, gw: wan_gw, dns: wan_dns }, dhcps);
+
+	// Active DHCP leases on the reported LAN networks, with their expiry.
+	// The controller shows it per client (ipv4_lease_expiration_timestamp_
+	// seconds) and requests the block via include_blocks when its copy is
+	// older than 5 minutes; it's small, so it's simply sent every time.
+	// Infinite leases are left out, there's no expiry to show.
+	data.ipv4_active_leases = [];
+	for (let l in dhcps.leases) {
+		if (l.expiry == null)
+			continue;
+		for (let n in data.network_table) {
+			if (n.purpose != 'wan' && n.addresses &&
+			    ip_in_subnet(l.ip, n.ip, +split(n.addresses[0], '/')[1])) {
+				push(data.ipv4_active_leases, { mac: l.mac, leaseExpiry: l.expiry });
+				break;
+			}
+		}
+	}
 
 	// LLDP neighbours -> per-port mac_table + lldp_table (topology link).
 	const lldp = apply_lldp(API, cfg, port_table, all_devices);
