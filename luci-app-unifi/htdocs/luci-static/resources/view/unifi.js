@@ -287,6 +287,29 @@ return view.extend({
 		o.depends('provider', '');
 		o.modalonly = true;
 
+		/* wireless: neighbour scan */
+
+		o = s.taboption('wireless', form.Flag, 'scan', _('Scan for neighbouring networks'),
+			_('Reports the networks around to the controller. The channels are scanned one at a time with short off-channel visits, so that connected clients are not affected.'));
+		o.default = o.enabled;
+		o.depends('provider', 'openwrt');
+		o.depends('provider', '');
+		o.modalonly = true;
+
+		o = s.taboption('wireless', form.Value, 'scan_interval', _('Scan interval'),
+			_('Seconds between two scans of one channel (plus the operating channel). All channels are covered after one interval per channel.'));
+		o.datatype = 'min(5)';
+		o.placeholder = '60';
+		o.depends('scan', '1');
+		o.modalonly = true;
+
+		o = s.taboption('wireless', form.Value, 'scan_max_load', _('Scan load limit'),
+			_('kbit/s of traffic on a radio above which no scan is started on it.'));
+		o.datatype = 'uinteger';
+		o.placeholder = '5000';
+		o.depends('scan', '1');
+		o.modalonly = true;
+
 		/* wireless: PSKs */
 
 		o = s.taboption('wireless', form.Flag, 'psk_sync', _('Use controller PSKs'),
