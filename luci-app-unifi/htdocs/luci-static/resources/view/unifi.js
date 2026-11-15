@@ -146,6 +146,13 @@ return view.extend({
 		o = s.taboption('general', form.Flag, 'debug', _('Debug logging'));
 		o.modalonly = true;
 
+		o = s.taboption('general', form.Flag, 'ssh_keys', _('Use controller SSH keys'),
+			_('Add the SSH keys of the controller (Device SSH Authentication) to the authorized keys of this device. They are kept in a separate block, locally configured keys remain; disabling this removes them again.'));
+		o.depends('provider', 'openwrt');
+		o.depends('provider', 'openwrt_gw');
+		o.depends('provider', '');
+		o.modalonly = true;
+
 		/* device */
 
 		o = s.taboption('device', form.Value, 'hostname', _('Name'),
