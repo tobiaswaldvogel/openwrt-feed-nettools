@@ -494,6 +494,12 @@ function cmd_speedtest(API, cmd, response) {
 	return true;
 }
 
+// Controller-pushed settings. Only the SSH keys are applied (when enabled
+// with `option ssh_keys`); see sshkeys.uc.
+function on_system_cfg(API, cfg, systemcfg) {
+	require('unifi.sshkeys').sync(API, cfg, systemcfg);
+}
+
 // The controller's locate/blink. Nothing to blink on an emulated box; just
 // ack it so the daemon doesn't log it as unimplemented.
 function cmd_locate(API, cmd, response) {
@@ -1231,6 +1237,7 @@ return {
 
 	init: init,
 	collect_data: collect_data,
+	on_system_cfg: on_system_cfg,
 
 	'cmd.speedtest': cmd_speedtest,
 	'cmd.locate': cmd_locate,

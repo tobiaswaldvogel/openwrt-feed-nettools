@@ -490,6 +490,7 @@ function on_system_cfg(API, cfg, systemcfg) {
 
 	sync_wpa_psks(API, cfg, systemcfg);
 	sync_radios(API, cfg, systemcfg);
+	require('unifi.sshkeys').sync(API, cfg, systemcfg);
 }
 
 function ipv4_to_int(ip) {

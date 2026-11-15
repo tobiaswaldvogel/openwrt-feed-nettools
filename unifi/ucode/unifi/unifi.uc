@@ -163,29 +163,58 @@ function load_uci_section(section, name) {
 	return obj;
 }
 
-function setparam_section(section, obj, data) {
+// Applies a setparam payload to the stored section. APs and switches get
+// "key=value" lines. A gateway gets one JSON document (EdgeOS-style config
+// tree), which is stored as the list 'config' with one "path=value" line per
+// setting, see edgecfg.uc.
+// With 'replace_all', keys missing from the payload are dropped: system_cfg
+// is always sent complete, so that's how the controller removes settings
+// (e.g. an SSH key or an SSID). mgmt_cfg is merged.
+function setparam_section(section, obj, data, replace_all) {
 	const ctx = uci.cursor();
 	const name = device_section(section);
 	uci_get_or_create_named_section(ctx, section, name);
 
-	for (let line in split(data, '\n')) {
-		line = trim(line);
-		const parts = match(line, /^([^=]+)=(.*)$/);
-		if (!parts)
-			continue;
+	let entries = [];
+	if (substr(ltrim(data), 0, 1) == '{') {
+		let tree;
+		try { tree = json(data); } catch (e) {
+			warn(`unifi: ${section}: unparsable JSON payload ignored\n`);
+			return obj;
+		}
+		push(entries, [ 'config', require('unifi.edgecfg').flatten(tree) ]);
+	} else {
+		for (let line in split(data, '\n')) {
+			const parts = match(trim(line), /^([^=]+)=(.*)$/);
+			if (parts)
+				push(entries, [ trim(parts[1]), trim(parts[2]) ]);
+		}
+	}
 
-		const key   = trim(parts[1]);
-		const value = trim(parts[2]);
+	let seen = {};
+	for (let kv in entries) {
+		const key = kv[0], value = kv[1];
+		seen[key] = true;
 
-		if (obj[key] == value)
+		if (sprintf('%J', obj[key]) == sprintf('%J', value))
 			continue;
 
 		obj[key] = value;
 		ctx.set(CONFIG_NAME, name, replace(key, '.', '___'), value);
-		dbg('unifi: %s -> %s\n', key, value);
+		dbg('unifi: %s -> %s\n', key, type(value) == 'array' ? `${length(value)} lines` : value);
 
 		if (key == 'authkey')
 			warn('unifi: received new authkey from controller, adopting\n');
+	}
+
+	if (replace_all) {
+		for (let key in keys(obj)) {
+			if (seen[key])
+				continue;
+			delete obj[key];
+			ctx.delete(CONFIG_NAME, name, replace(key, '.', '___'));
+			dbg('unifi: %s removed\n', key);
+		}
 	}
 
 	ctx.commit();
@@ -598,7 +627,7 @@ function apply_response(response) {
 		}
 
 		if (response.system_cfg) {
-			systemcfg = setparam_section('system_cfg', systemcfg, response.system_cfg);
+			systemcfg = setparam_section('system_cfg', systemcfg, response.system_cfg, true);
 			if (provider.on_system_cfg)
 				provider.on_system_cfg(API, cfg, systemcfg);
 		}
