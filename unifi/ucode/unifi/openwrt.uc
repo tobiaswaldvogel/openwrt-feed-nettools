@@ -896,9 +896,8 @@ function band_to_radio_type(band) {
 /* channel of a rotation is triggered (iw ... scan trigger, which doesn't */
 /* wait), and its results are collected from the kernel's BSS list on the */
 /* next cycle into a per-radio cache, which feeds scan_table. Each        */
-/* off-channel visit is 30 TU (110 TU on DFS channels, which only allow  */
-/* passive scanning, to hear at least one beacon), and scanning pauses    */
-/* while the radio carries more than scan_max_load kbit/s.                */
+/* off-channel visit is 110 TU, enough to hear one beacon, and scanning   */
+/* pauses while the radio carries more than scan_max_load kbit/s.         */
 /*                                                                        */
 /*   option scan '0'            disable (default: enabled)                */
 /*   option scan_interval '60'  seconds between two scans                 */
@@ -908,15 +907,13 @@ function band_to_radio_type(band) {
 
 let scan_state = {};    // ifname -> { idx, cache, pending, last, bytes, mandatory }
 
-const SCAN_DWELL = 30;          // TU, active scan
-const SCAN_DWELL_PASSIVE = 110; // TU, > one beacon interval (102.4 TU)
+// TU per channel: more than one beacon interval (102.4 TU), as some
+// networks (mesh backhauls, DFS channels) can only be heard by beacon.
+// Once a minute this showed no client impact.
+const SCAN_DWELL = 110;
 
 function scan_enabled(cfg) {
 	return !(cfg.scan in [ '0', 'false', 'no', 'off', 'disabled' ]);
-}
-
-function is_dfs_channel(band, ch) {
-	return band == '5g' && ch >= 52 && ch <= 144;
 }
 
 function channel_to_freq(band, ch) {
@@ -1087,10 +1084,8 @@ function scan_radio(API, cfg, ifname, band, op_channel, op_noise, caps, radio_by
 			const target = rot[st.idx++ % length(rot)];
 			let chans = uniq([ +op_channel, target ]);
 			chans = filter(chans, c => c > 0);
-			const dwell = length(filter(chans, c => c != +op_channel && is_dfs_channel(band, c)))
-				? SCAN_DWELL_PASSIVE : SCAN_DWELL;
 			const freqs = join(' ', map(chans, c => channel_to_freq(band, c)));
-			const opts = st.mandatory ? ` duration ${dwell} duration-mandatory` : '';
+			const opts = st.mandatory ? ` duration ${SCAN_DWELL} duration-mandatory` : '';
 
 			let err = trim(cmd_output(`iw dev ${ifname} scan trigger ap-force flush freq ${freqs}${opts} 2>&1`));
 			if (length(err) && st.mandatory && match(err, /\((-95|-22)\)/)) {
@@ -1177,6 +1172,111 @@ function mhz_to_chwidth(mhz) {
         }
 }
 
+/* ---------------------------------------------------------------------- */
+/* radio and VAP statistics                                               */
+/*                                                                        */
+/* Channel utilization from the survey of the operating channel (busy,    */
+/* receive and transmit time), as a real AP reports it in athstats: total */
+/* busy time, own transmit time, receive time of the own clients          */
+/* (estimated from their received bytes and rate) and the rest as         */
+/* interference. Per VAP the average client signal and TX retries,        */
+/* attempts and drops, accumulated from per-station deltas so that the    */
+/* counters don't drop when a client leaves.                              */
+/* ---------------------------------------------------------------------- */
+
+let survey_prev = {};   // ifname -> { active, busy, rx, tx } (ms)
+let sta_prev = {};      // mac -> { retries, packets, failed, rx_bytes }
+let vap_counters = {};  // vap name -> { tx_retries, wifi_tx_attempts, wifi_tx_dropped }
+
+// Cumulative counters of the operating channel from `iw survey dump`.
+function read_survey(ifname) {
+	let cur, out = {};
+	for (let line in split(cmd_output(`iw dev ${ifname} survey dump 2>/dev/null`), '\n')) {
+		if (index(line, 'frequency:') >= 0) {
+			cur = index(line, '[in use]') >= 0;
+			continue;
+		}
+		if (!cur)
+			continue;
+		const c = index(line, ':');
+		if (c < 0)
+			continue;
+		const key = trim(substr(line, 0, c)), val = int(+split(trim(substr(line, c + 1)), ' ')[0]);
+		switch (key) {
+		case 'channel active time':   out.active = val; break;
+		case 'channel busy time':     out.busy = val; break;
+		case 'channel receive time':  out.rx = val; break;
+		case 'channel transmit time': out.tx = val; break;
+		}
+	}
+	return (out.active != null && out.busy != null) ? out : null;
+}
+
+// athstats-style channel utilization in % since the previous call, or null.
+// self_rx_ms: estimated receive airtime of the own clients in that period.
+function channel_utilization(ifname, self_rx_ms) {
+	const cur = read_survey(ifname);
+	if (!cur)
+		return null;
+
+	let prev = survey_prev[ifname];
+	survey_prev[ifname] = cur;
+	if (!prev)
+		return null;
+
+	// some drivers reset the counters (e.g. after a scan): the current
+	// values are then the delta since the reset
+	if (cur.active < prev.active || cur.busy < prev.busy)
+		prev = { active: 0, busy: 0, rx: 0, tx: 0 };
+
+	const active = cur.active - prev.active;
+	if (active <= 0)
+		return null;
+
+	const pct = v => min(100, max(0, int(100 * v / active + 0.5)));
+	const busy = cur.busy - prev.busy;
+	const tx = max(0, (cur.tx ?? 0) - (prev.tx ?? 0));
+	const rx = max(0, (cur.rx ?? 0) - (prev.rx ?? 0));
+	const self_rx = min(rx, self_rx_ms);
+
+	const total = pct(busy), self_tx = pct(tx), self_rxp = pct(self_rx);
+	return {
+		cu_total: total,
+		cu_self_tx: self_tx,
+		cu_self_rx: self_rxp,
+		cu_interf: max(0, total - self_tx - self_rxp),
+	};
+}
+
+// Per-station deltas since the previous call: { retries, attempts, failed,
+// rx_ms } (rx_ms: airtime estimate of the received data).
+function sta_deltas(sta) {
+	const mac = lc(sta.mac);
+	const cur = {
+		retries: sta.tx?.retries ?? 0,
+		packets: sta.tx?.packets ?? 0,
+		failed: sta.tx?.failed ?? 0,
+		rx_bytes: sta.rx?.bytes ?? 0,
+	};
+	let prev = sta_prev[mac];
+	sta_prev[mac] = cur;
+
+	// new station or reassociated (counters restarted)
+	if (!prev || cur.packets < prev.packets || cur.rx_bytes < prev.rx_bytes)
+		prev = { retries: 0, packets: 0, failed: 0, rx_bytes: 0 };
+
+	const d = {
+		retries: max(0, cur.retries - prev.retries),
+		attempts: max(0, cur.packets - prev.packets) + max(0, cur.retries - prev.retries),
+		failed: max(0, cur.failed - prev.failed),
+		rx_ms: 0,
+	};
+	const rate = sta.rx?.rate;          // kbit/s
+	if (rate > 0)
+		d.rx_ms = (cur.rx_bytes - prev.rx_bytes) * 8 / rate;   // bits / (kbit/s) = ms
+	return d;
+}
+
 function get_wireless_data(API, cfg, all_devices, with_scan) {
 	let vap_table = [];
 	let radio_table = [];
@@ -1212,6 +1312,7 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 		// vap_table across all radios processed so far.
 		let radio_vap_count = 0;
 		let radio_bytes = 0;    // rx+tx of all VAPs, for the scan load check
+		let radio_self_rx_ms = 0;
 
 		for (let iface in radio_data.interfaces) {
 			const ifname = iface.config.ifname;
@@ -1224,6 +1325,8 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 				push(wifi_ifaces, vlan.ifname);
 
 			let iface_satisfaction = 0;
+			let signal_sum = 0;
+			let vc = vap_counters[ifname] ??= { tx_retries: 0, wifi_tx_attempts: 0, wifi_tx_dropped: 0 };
 
 			for (let wifi_iface in wifi_ifaces) {
 				const assoc =  API.ubus.call('iwinfo', 'assoclist', {'device': wifi_iface});
@@ -1233,6 +1336,13 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 				for (let sta in assoc.results) {
 					let sta_satisfaction = satisfaction(sta);
 					iface_satisfaction += sta_satisfaction;
+					signal_sum += sta.signal;
+
+					const d = sta_deltas(sta);
+					vc.tx_retries += d.retries;
+					vc.wifi_tx_attempts += d.attempts;
+					vc.wifi_tx_dropped += d.failed;
+					radio_self_rx_ms += d.rx_ms;
 
 					let sta_item = {
 						mac: lc(sta.mac),
@@ -1304,6 +1414,9 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 				num_sta: num_sta,
 				num_satisfaction_sta: num_sta,
 				satisfaction: iface_satisfaction,
+				tx_retries: vc.tx_retries,
+				wifi_tx_attempts: vc.wifi_tx_attempts,
+				wifi_tx_dropped: vc.wifi_tx_dropped,
 				state: 'RUN',
 				sta_table: sta_table,
 				rx_packets: 0,
@@ -1329,6 +1442,10 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 
 			if (htmode)
 				vap.ht = +htmode[0];
+
+			// the controller averages this weighted by num_sta
+			if (num_sta)
+				vap.avg_client_signal = int(signal_sum / num_sta);
 
 			push(vap_table, vap);
 			radio_vap_count++;
@@ -1399,6 +1516,14 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 
 		if (htmode)
 			radio_item.ht = +htmode[0];
+
+		// channel utilization; the controller takes cu_total/self_rx/self_tx
+		// from athstats, cu_interf directly from the radio entry
+		const cu = radio_vap_count ? channel_utilization(radio_data.interfaces[0].config.ifname, radio_self_rx_ms) : null;
+		if (cu) {
+			radio_item.athstats = { name: radio, ...cu };
+			radio_item.cu_interf = cu.cu_interf;
+		}
 
 		if (with_scan && radio_vap_count && band in [ '2g', '5g' ])
 			radio_item.scan_table = scan_radio(API, cfg, radio_data.interfaces[0].config.ifname,
