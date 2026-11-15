@@ -1,17 +1,10 @@
-#
-# Copyright (C) 2026
-#
-# This is free software, licensed under the GNU General Public License v2.
-# See /LICENSE for more information.
-#
-
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=unifi
 PKG_VERSION:=1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
-PKG_MAINTAINER:=
+PKG_MAINTAINER:=Tobias Waldvogel <tobias.waldvogel@gmail.com>
 PKG_LICENSE:=GPL-2.0-or-later
 
 include $(INCLUDE_DIR)/package.mk
@@ -20,6 +13,7 @@ define Package/unifi
   SECTION:=net
   CATEGORY:=Network
   TITLE:=UniFi inform-protocol device emulator
+  PKGARCH:=all
   DEPENDS:=\
   	+ucode +ucode-mod-aes \
 	+ucode-mod-zlib \
@@ -53,11 +47,7 @@ endef
 
 define Package/unifi/install
 	$(INSTALL_DIR) $(1)/usr/share/ucode/unifi
-	$(INSTALL_BIN) ./ucode/unifi/unifi.uc $(1)/usr/share/ucode/unifi/unifi.uc
-	$(INSTALL_BIN) ./ucode/unifi/netgear.uc $(1)/usr/share/ucode/unifi/netgear.uc
-	$(INSTALL_BIN) ./ucode/unifi/tplink.uc $(1)/usr/share/ucode/unifi/tplink.uc
-	$(INSTALL_BIN) ./ucode/unifi/openwrt.uc $(1)/usr/share/ucode/unifi/openwrt.uc
-	$(INSTALL_BIN) ./ucode/unifi/openwrt_gw.uc $(1)/usr/share/ucode/unifi/openwrt_gw.uc
+	$(INSTALL_DATA) ./ucode/unifi/*.uc $(1)/usr/share/ucode/unifi/
 
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/unifi.init $(1)/etc/init.d/unifi

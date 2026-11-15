@@ -34,7 +34,6 @@ reload_service() {
 
 service_triggers() {
         procd_add_reload_trigger "unifi"
-        procd_add_config_trigger "config.change" "unifi" /etc/init.d/unifi reload
 }
 
 boot() {
