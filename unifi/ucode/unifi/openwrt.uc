@@ -886,39 +886,230 @@ function band_to_radio_type(band) {
 	}
 }
 
-function get_scan_table(API,iface, band, table) {
-	const survey =  API.ubus.call('iwinfo', 'scan', { device: iface });
+/* ---------------------------------------------------------------------- */
+/* neighbour scan                                                         */
+/*                                                                        */
+/* A full scan (iwinfo scan) leaves the operating channel for every       */
+/* channel in one go: ~1.6s on 2.4GHz, ~20s on 5GHz with DFS, with client */
+/* packet loss, and blocks the inform loop meanwhile. Instead, every      */
+/* scan_interval seconds a short scan of the own channel plus the next    */
+/* channel of a rotation is triggered (iw ... scan trigger, which doesn't */
+/* wait), and its results are collected from the kernel's BSS list on the */
+/* next cycle into a per-radio cache, which feeds scan_table. Each        */
+/* off-channel visit is 30 TU (110 TU on DFS channels, which only allow  */
+/* passive scanning, to hear at least one beacon), and scanning pauses    */
+/* while the radio carries more than scan_max_load kbit/s.                */
+/*                                                                        */
+/*   option scan '0'            disable (default: enabled)                */
+/*   option scan_interval '60'  seconds between two scans                 */
+/*   option scan_max_load '5000'  kbit/s on the radio above which no scan */
+/*                              is started                                */
+/* ---------------------------------------------------------------------- */
 
-	if (!survey)
-		return;
+let scan_state = {};    // ifname -> { idx, cache, pending, last, bytes, mandatory }
 
-	for (let ap in survey.results) {
-		// NOTE: same caveat as band_to_radio_type() -- iwinfo's ap.band for
-		// 6GHz scan results is unverified against real hardware. Treating
-		// anything that isn't '2' as 'na' for now.
-		const ap_band = ap.band == '2' ? 'ng' : 'na';
+const SCAN_DWELL = 30;          // TU, active scan
+const SCAN_DWELL_PASSIVE = 110; // TU, > one beacon interval (102.4 TU)
 
-		if (ap_band != band)
+function scan_enabled(cfg) {
+	return !(cfg.scan in [ '0', 'false', 'no', 'off', 'disabled' ]);
+}
+
+function is_dfs_channel(band, ch) {
+	return band == '5g' && ch >= 52 && ch <= 144;
+}
+
+function channel_to_freq(band, ch) {
+	if (band == '2g')
+		return ch == 14 ? 2484 : 2407 + 5 * ch;
+	return 5000 + 5 * ch;
+}
+
+function freq_to_channel(f) {
+	if (f == 2484)
+		return 14;
+	if (f < 3000)
+		return int((f - 2407) / 5);
+	if (f >= 5955)
+		return int((f - 5950) / 5);
+	return int((f - 5000) / 5);
+}
+
+// Only the lines parse_iw_scan() needs: the BSS line, all top-level
+// fields (which also end a section) and three nested ones. The full dump
+// is ~90 lines per BSS, which is slow to parse on a small CPU.
+const SCAN_DUMP_FILTER = `grep -E '^BSS |^[[:space:]][^[:space:]]|\\* (secondary channel offset|channel width|center freq segment 1|Authentication suites|Pairwise ciphers):'`;
+
+// BSS entries from (filtered) `iw dev X scan dump` output. Every line is
+// split once at the first ':' and dispatched on its key, no regex per field.
+function parse_iw_scan(out) {
+	let list = [], e, section;
+
+	for (let line in split(out ?? '', '\n')) {
+		if (substr(line, 0, 4) == 'BSS ') {
+			e = { bssid: lc(substr(line, 4, 17)), essid: '', signal: null, age: 0,
+			      ht_sec: 0, vht_width: 0, vht_center: 0, sec: 'open', enterprise: false, ccmp: false };
+			push(list, e);
+			section = null;
+			continue;
+		}
+
+		const c = index(line, ':');
+		if (!e || c < 0)
 			continue;
 
-		let entry = {
-			band: ap.band == '2' ? 'ng' : 'na',
-			bssid: lc(ap.bssid),
-			essid: ap.ssid,
-			channel: ap.channel,
-			freq: ap.mhz,
-			signal: ap.signal,
-		};
+		const key = trim(substr(line, 0, c));
+		const val = trim(substr(line, c + 1));
 
-		if (ap.vht_operation)
-			entry.bw = ap.vht_operation.channel_width;
-		else if (ap.ht_operation)
-			entry.bw = ap.ht_operation.channel_width;
-		if (entry.bw == 2040)
-			entry.bw = 40;
-
-		push(table, entry);
+		if (substr(line, 0, 2) != '\t\t') {
+			section = null;
+			switch (key) {
+			case 'freq':      e.freq = int(+val); break;
+			case 'signal':    e.signal = int(+split(val, ' ')[0]); break;
+			case 'last seen': e.age = int(+split(val, ' ')[0] / 1000); break;
+			case 'SSID':      e.essid = val; break;
+			case 'capability':
+				if (e.sec == 'open' && index(val, 'Privacy') >= 0)
+					e.sec = 'wep';
+				break;
+			case 'WPA':
+				if (e.sec in [ 'open', 'wep' ])
+					e.sec = 'wpa';
+				break;
+			case 'RSN':
+				if (e.sec != 'wpa3')
+					e.sec = 'wpa2';
+				section = key;
+				break;
+			case 'HT operation':
+			case 'VHT operation':
+				section = key;
+				break;
+			}
+		}
+		else if (section == 'HT operation' && key == '* secondary channel offset')
+			e.ht_sec = (val == 'above') ? 1 : (val == 'below') ? -1 : 0;
+		else if (section == 'VHT operation' && key == '* channel width')
+			e.vht_width = int(+split(val, ' ')[0]);
+		else if (section == 'VHT operation' && key == '* center freq segment 1')
+			e.vht_center = int(+val);
+		else if (section == 'RSN' && key == '* Authentication suites') {
+			if (index(val, 'SAE') >= 0)
+				e.sec = 'wpa3';
+			if (index(val, '802.1X') >= 0)
+				e.enterprise = true;
+		}
+		else if (section == 'RSN' && key == '* Pairwise ciphers' && index(val, 'CCMP') >= 0)
+			e.ccmp = true;
 	}
+
+	return filter(list, x => x.freq && x.signal != null);
+}
+
+const SECURITY_NAME = { open: 'Open', wep: 'WEP', wpa: 'WPA', wpa2: 'WPA2', wpa3: 'WPA3' };
+
+// The controller drops scan entries older than its inform interval + 10s
+// (100s by default) and only stores those younger than 30s. A real AP
+// rescans all channels that often; with the rotation here a channel comes
+// around only every few minutes, so the age of a cached entry is reported
+// as at most this. Networks that are gone still expire from the cache.
+const SCAN_REPORT_MAX_AGE = 25;
+
+// scan_table entry in the format of a real UniFi AP. The controller derives
+// last_seen from 'age'.
+function scan_entry(e, band, noise, now) {
+	const age = min(now - e.last_seen, SCAN_REPORT_MAX_AGE);
+	let bw = e.ht_sec ? 40 : 20;
+	let center = e.freq + 10 * e.ht_sec;
+	if (e.vht_width >= 1 && e.vht_center) {
+		bw = (e.vht_width == 1) ? 80 : 160;
+		center = (e.freq < 3000) ? center : 5000 + 5 * e.vht_center;
+	}
+
+	let security = SECURITY_NAME[e.sec];
+	if (e.sec in [ 'wpa', 'wpa2', 'wpa3' ])
+		security += (e.enterprise ? '-Enterprise' : '-Personal') + (e.ccmp ? ' (AES/CCMP)' : '');
+
+	return {
+		age,
+		band: band_to_radio_type(band),
+		bssid: e.bssid,
+		essid: e.essid,
+		channel: freq_to_channel(e.freq),
+		freq: e.freq,
+		center_freq: center,
+		bw,
+		signal: e.signal,
+		noise,
+		rssi: max(0, e.signal - noise),
+		rssi_age: age,
+		security,
+		is_adhoc: false,
+		is_ubnt: false,
+	};
+}
+
+// One scan step for a radio; returns its scan_table from the cache.
+// radio_bytes: rx+tx bytes of all its VAPs, for the load check.
+function scan_radio(API, cfg, ifname, band, op_channel, op_noise, caps, radio_bytes) {
+	const now = time();
+	const interval = +(cfg.scan_interval ?? 60) || 60;
+	let st = scan_state[ifname];
+	if (!st)
+		st = scan_state[ifname] = { idx: 0, cache: {}, pending: false, last: 0, mandatory: true };
+
+	// rotation: the radio's channels of this band
+	const rot = filter(caps?.channels ?? [], c => band == '2g' ? c <= 14 : (c >= 32 && c <= 177));
+
+	// 1. results of the previous trigger
+	if (st.pending) {
+		for (let e in parse_iw_scan(cmd_output(`iw dev ${ifname} scan dump 2>/dev/null | ${SCAN_DUMP_FILTER}`))) {
+			e.last_seen = now - e.age;
+			st.cache[e.bssid] = e;
+		}
+		st.pending = false;
+	}
+
+	// 2. forget networks not seen for three rotations (at least 30 min)
+	const ttl = max(1800, 3 * length(rot) * interval);
+	for (let b, e in st.cache)
+		if (now - e.last_seen > ttl)
+			delete st.cache[b];
+
+	// 3. next scan, unless it's not due yet or the radio is busy
+	const kbps = (st.bytes != null && now > st.last) ? (radio_bytes - st.bytes) * 8 / 1000 / (now - st.last) : 0;
+	const max_load = +(cfg.scan_max_load ?? 5000);
+
+	if (length(rot) && now - st.last >= interval) {
+		if (st.bytes != null && kbps > max_load) {
+			API.dbg('unifi: %s: %d kbit/s, scan postponed\n', ifname, kbps);
+		} else {
+			const target = rot[st.idx++ % length(rot)];
+			let chans = uniq([ +op_channel, target ]);
+			chans = filter(chans, c => c > 0);
+			const dwell = length(filter(chans, c => c != +op_channel && is_dfs_channel(band, c)))
+				? SCAN_DWELL_PASSIVE : SCAN_DWELL;
+			const freqs = join(' ', map(chans, c => channel_to_freq(band, c)));
+			const opts = st.mandatory ? ` duration ${dwell} duration-mandatory` : '';
+
+			let err = trim(cmd_output(`iw dev ${ifname} scan trigger ap-force flush freq ${freqs}${opts} 2>&1`));
+			if (length(err) && st.mandatory && match(err, /\((-95|-22)\)/)) {
+				// driver without a settable dwell time: use its default
+				st.mandatory = false;
+				err = trim(cmd_output(`iw dev ${ifname} scan trigger ap-force flush freq ${freqs} 2>&1`));
+			}
+
+			if (length(err))
+				API.dbg('unifi: %s: scan of %s failed: %s\n', ifname, freqs, err);
+			else
+				st.pending = true;
+		}
+		st.last = now;
+		st.bytes = radio_bytes;
+	}
+
+	const noise = (op_noise && op_noise < 0) ? op_noise : -95;
+	return map(sort(values(st.cache), (a, b) => b.signal - a.signal), e => scan_entry(e, band, noise, now));
 }
 
 function clamp(v, lo, hi) {
@@ -1002,11 +1193,13 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 		// config with 'auto' / no txpower set
 		let op_channel = radio_data.config.channel;
 		let op_txpower = radio_data.config.txpower;
+		let op_noise;
 		for (let iface in radio_data.interfaces) {
 			const info = API.ubus.call('iwinfo', 'info', { device: iface.ifname ?? iface.config.ifname });
 			if (info?.channel) {
 				op_channel = info.channel;
 				op_txpower = info.txpower ?? op_txpower;
+				op_noise = info.noise;
 				break;
 			}
 		}
@@ -1018,6 +1211,7 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 		// check below is scoped to this radio instead of the cumulative
 		// vap_table across all radios processed so far.
 		let radio_vap_count = 0;
+		let radio_bytes = 0;    // rx+tx of all VAPs, for the scan load check
 
 		for (let iface in radio_data.interfaces) {
 			const ifname = iface.config.ifname;
@@ -1138,6 +1332,7 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 
 			push(vap_table, vap);
 			radio_vap_count++;
+			radio_bytes += vap.rx_bytes + vap.tx_bytes;
 		}
 
 
@@ -1205,8 +1400,9 @@ function get_wireless_data(API, cfg, all_devices, with_scan) {
 		if (htmode)
 			radio_item.ht = +htmode[0];
 
-		if (with_scan && radio_vap_count)
-			get_scan_table(API, radio_data.interfaces[0].config.ifname, radio_type, radio_item.scan_table);
+		if (with_scan && radio_vap_count && band in [ '2g', '5g' ])
+			radio_item.scan_table = scan_radio(API, cfg, radio_data.interfaces[0].config.ifname,
+				band, op_channel, op_noise, caps, radio_bytes);
 
 		push(radio_table, radio_item);
 	}
@@ -1583,7 +1779,7 @@ function collect_data(API, cfg, data) {
 
 	data.port_table = get_port_data(API, cfg, all_devices);
 
-	const wdata = get_wireless_data(API, cfg, all_devices, false);
+	const wdata = get_wireless_data(API, cfg, all_devices, scan_enabled(cfg));
 	data.radio_table = wdata.radio;
 	data.vap_table = wdata.vap;
 	data.satisfaction = wdata.satisfaction;
