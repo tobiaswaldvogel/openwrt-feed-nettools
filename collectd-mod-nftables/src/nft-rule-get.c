@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+#include <inttypes.h>
 #include <netinet/in.h>
 
 #include <linux/netlink.h>
@@ -25,6 +26,7 @@
 
 #include "plugin.h"
 #include "utils/common/common.h"
+
 
 #define PLUGIN_NAME "nftables"
 
@@ -65,7 +67,7 @@ struct mnl_socket *nl = NULL;
 uint32_t portid;
 
 int plugin_dispatch_values(value_list_t const *vl) {
-  printf("Dispatch %s%s%s %s-%s, %ld\n",
+  printf("Dispatch %s%s%s %s-%s, %" PRIu64 "\n",
     vl->plugin, vl->plugin_instance[0] ? "-" : "", vl->plugin_instance,
     vl->type, vl->type_instance,
 	vl->values->derive);
@@ -357,7 +359,7 @@ static int nftables_read_rule_counter_cb(const struct nlmsghdr *nlh, void *ctx)
       mnl_attr_put_u64(query, NFTA_RULE_HANDLE, htobe64(handle));
 
       ctr->handle = handle;
-  printf("%s resolved to handle %ld\n", ctr->name, ctr->handle);
+      printf("%s resolved to handle %" PRIu64 "\n", ctr->name, ctr->handle);
       
       if (!ctr->skip_dispatch)
         nftables_parse_counter(ctr_data, (const char*)comment, ctr);
