@@ -5,7 +5,7 @@ CONFIG=wireless_psk
 USE_PROCD=1
 
 add_file() {
-	local psk_file ifname
+	local psk_file ifname vlan
 
 	config_get psk_file     $1 wpa_psk_file
 	config_get ifname       $1 ifname
@@ -13,9 +13,15 @@ add_file() {
 
 	[ -z "${psk_file}" ] && return
 
-	if [ "${PSK_IFACES}" == "${PSK_IFACES#*$ifname}" ]; then
-		PSK_IFACES="${PSK_IFACES} ${ifname}"
+	if [ -z "${ifname}" ]; then
+		logger -t wireless_psk "skipping wifi-iface '$1': wpa_psk_file needs an explicit ifname"
+		return
 	fi
+
+	case " ${PSK_IFACES} " in
+		*" ${ifname} "*) ;;
+		*) PSK_IFACES="${PSK_IFACES} ${ifname}" ;;
+	esac
 
 	eval ${ifname}_vlan=${vlan}
 	eval ${ifname}_psk_file=${psk_file}
