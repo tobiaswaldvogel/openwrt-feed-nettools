@@ -1,37 +1,29 @@
-#
-# Copyright (C) 2007-2020 OpenWrt.org
-#
-# This is free software, licensed under the GNU General Public License v2.
-# See /LICENSE for more information.
-#
-
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=extcollect-mod-nftables
-PKG_VERSION=1.1
-PKG_RELEASE=1
+PKG_VERSION:=1.1
+PKG_RELEASE:=2
+PKG_MAINTAINER:=Tobias Waldvogel <tobias.waldvogel@gmail.com>
+PKG_LICENSE:=GPL-2.0
+
+PKG_BUILD_DEPENDS:=collectd
 
 include $(INCLUDE_DIR)/package.mk
 
 define Package/$(PKG_NAME)
   SECTION:=utils
   CATEGORY:=Utilities
-  TITLE:=Lightweight system statistics collection daemon
   URL:=https://collectd.org/
   TITLE:=nftables input plugin
-  DEPENDS:=+libnftnl
+  DEPENDS:=+libmnl +collectd
 endef
 
 define Package/$(PKG_NAME)/description
   Collectd nftables module
 endef
 
-define Build/Configure
-	for dir in $(BUILD_DIR)/collectd-[0-9]*; do \
-		COLLECTD_DIR=$$$$dir; \
-	done; \
-	$(SED) "s#\$$$$(COLLECTD_DIR)#$$$$COLLECTD_DIR#g" $(PKG_BUILD_DIR)/Makefile
-endef
+# collectd has no installed headers: build against its build directory
+MAKE_FLAGS += COLLECTD_DIR=$(lastword $(wildcard $(BUILD_DIR)/collectd-[0-9]*))
 
 define Package/$(PKG_NAME)/install
 	$(INSTALL_DIR) $(1)/usr/lib/collectd
