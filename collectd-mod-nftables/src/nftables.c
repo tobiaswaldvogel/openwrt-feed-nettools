@@ -35,6 +35,8 @@
 #include <sys/capability.h>
 #endif
 
+#include <inttypes.h>
+
 #define PLUGIN_NAME "nftables"
 
 /* Max size of rule lookup query */
@@ -397,22 +399,31 @@ static void nftables_parse_counter(struct nlattr *ctr_data, ctr_t *ctr,
     }
   }
 
-  if (ctr) {
- /*
-    if (have_packets) {
-      ctr->vl_packets.values = &(value_t){.derive = (derive_t)packets};
-      plugin_dispatch_values(&(ctr->vl_packets));
-    }
-
-    if (have_bytes) {
-      ctr->vl_bytes.values = &(value_t){.derive = (derive_t)bytes};
-      plugin_dispatch_values(&(ctr->vl_bytes));
-    }
-*/
-  } else if (name)
+  if (ctr)
+    nftables_dispatch_counter(ctr->instance, NULL,
+                              ctr->display ? ctr->display : ctr->name,
+                              have_bytes, have_packets, bytes, packets);
+  else if (name)
     nftables_dispatch_counter(plugin_instance, prefix, name, have_bytes,
                               have_packets, bytes, packets);
 } /* nftables_parse_counter */
+
+/*
+ * Check whether a named counter matches a counter config entry
+ */
+static int nftables_named_counter_match(const ctr_t *ctr, u_int8_t family,
+                                        const char *table, const char *name) {
+  if (ctr->nfgen_family != family)
+    return 0;
+
+  if (ctr->table && strcmp(ctr->table, table))
+    return 0;
+
+  if (ctr->name && strcmp(ctr->name, name))
+    return 0;
+
+  return 1;
+}
 
 /*
  * Receives named counters and filters them according to config
@@ -445,33 +456,29 @@ static int nftables_read_named_counter_cb(const struct nlmsghdr *nlh,
         return MNL_CB_OK;
   }
 
-  if (!name || !ctr_attr) /* sanity check */
+  if (!name || !table || !ctr_attr) /* sanity check */
     return MNL_CB_OK;
     
-INFO("%s plugin: Read named counter %s %s %s", PLUGIN_NAME, nftables_family_to_string(nfg->nfgen_family), table, name);
+  DEBUG("%s plugin: Read named counter %s %s %s", PLUGIN_NAME,
+        nftables_family_to_string(nfg->nfgen_family), table, name);
 
-  if (!ctrs_named_len) { /* Unfiltered => All counters */
+  if (ignore_selected) { /* Dispatch all counters except the selected ones */
+    for (ctr = ctrs_named; ctr < ctrs_named + ctrs_named_len; ctr++)
+      if (nftables_named_counter_match(ctr, nfg->nfgen_family, table, name))
+        return MNL_CB_OK;
+  }
+
+  if (!ctrs_named_len || ignore_selected) { /* All (remaining) counters */
     ssnprintf(vl.plugin_instance, sizeof(vl.plugin_instance), "%s %s",
               nftables_family_to_string(nfg->nfgen_family), table);
     sstrncpy(vl.type_instance, name, sizeof(vl.type_instance));
     nftables_dispatch_ctr(ctr_attr, &vl);
     return MNL_CB_OK;
   }
-  
+
   for (ctr = ctrs_named; ctr < ctrs_named + ctrs_named_len; ctr++) {
-    if (ctr->nfgen_family != nfg->nfgen_family)
+    if (!nftables_named_counter_match(ctr, nfg->nfgen_family, table, name))
       continue;
-
-    if (ctr->table && strcmp(ctr->table, table))
-      continue;
-
-    if (ctr->name && strcmp(ctr->name, name))
-      continue;
-
-    /* Match */
-
-    if (ignore_selected)
-      return MNL_CB_OK;
 
     if (ctr->instance)
       sstrncpy(vl.plugin_instance, ctr->instance, sizeof(vl.plugin_instance));
@@ -535,8 +542,8 @@ static int nftables_read_rule_counter_cb(const struct nlmsghdr *nlh,
     INFO("plugin %s: %s", PLUGIN_NAME, comment->value);
 */
   if (pos)
-    INFO("plugin %s: %lu", PLUGIN_NAME, be64toh(mnl_attr_get_u64(pos)));
-
+    DEBUG("%s plugin: rule position %" PRIu64, PLUGIN_NAME,
+          be64toh(mnl_attr_get_u64(pos)));
 
   if (!exprs) /* Rule without any expressions*/
     return (flags & NLM_F_MULTI) ? MNL_CB_OK : MNL_CB_ERROR;
@@ -555,7 +562,7 @@ static int nftables_read_rule_counter_cb(const struct nlmsghdr *nlh,
   } else if (!table || !chain) // || !comment || comment->type != NFTNL_UDATA_RULE_COMMENT)
     return (flags & NLM_F_MULTI) ? MNL_CB_OK : MNL_CB_ERROR;
 
-  INFO("plugin %s: got rule", PLUGIN_NAME);
+  DEBUG("%s plugin: got rule", PLUGIN_NAME);
 
   /* Find first counter */
   ctr_attr = NULL;
@@ -641,7 +648,7 @@ static int nftables_read_rule_counter_cb(const struct nlmsghdr *nlh,
     mnl_attr_put_u64(query, NFTA_RULE_HANDLE, htobe64(handle));
 
     ctr->handle = handle;
-    DEBUG("%s plugin: %s %s resolved to handle %ld", PLUGIN_NAME, ctr->chain,
+    DEBUG("%s plugin: %s %s resolved to handle %" PRIu64, PLUGIN_NAME, ctr->chain,
           ctr->name, ctr->handle);
 
     if (!ctr->skip_dispatch)
